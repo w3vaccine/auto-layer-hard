@@ -1492,7 +1492,6 @@ def _hybrid_residual_fill(
                 print(f"  residual top-up — coverage {cov_f:.3f} < 0.58")
                 soft2 = np.clip((_dist - 6.0) / 14.0, 0, 1)
                 before_ids = {inst.id for inst in filled}
-                pre_top_masks = {inst.id: inst.mask.copy() for inst in filled}
                 _cv_residual_gapfill(
                     rgb,
                     soft2,
@@ -1505,87 +1504,42 @@ def _hybrid_residual_fill(
                     absorb_dilate=5,
                     absorb_any_touch=False,
                 )
-                # Keep coverage gains on newcomers; revert primaries swollen into giants
-                kept = []
-                for inst in filled:
-                    if inst.id not in before_ids:
-                        continue
-                    ys, xs = np.where(inst.mask > 20)
-                    if len(xs) == 0:
-                        continue
-                    x0, x1 = int(xs.min()), int(xs.max()) + 1
-                    y0, y1 = int(ys.min()), int(ys.max()) + 1
-                    bbox_frac = ((x1 - x0) / w) * ((y1 - y0) / h)
-                    mask_frac = float(len(xs)) / img_px
-                    if (
-                        inst.id in pre_top_masks
-                        and (mask_frac > 0.10 or bbox_frac > 0.22)
-                    ):
-                        # Capture absorbed ink, revert primary, split the delta
-                        delta = np.where(
-                            (inst.mask > 40) & (pre_top_masks[inst.id] <= 40),
-                            inst.mask,
-                            0,
-                        ).astype(np.uint8)
-                        inst.mask = pre_top_masks[inst.id]
-                        ys, xs = np.where(inst.mask > 20)
-                        if len(xs):
-                            x0, x1 = int(xs.min()), int(xs.max()) + 1
-                            y0, y1 = int(ys.min()), int(ys.max()) + 1
-                            inst.bbox_norm = [
-                                x0 / w,
-                                y0 / h,
-                                (x1 - x0) / w,
-                                (y1 - y0) / h,
-                            ]
-                        kept.append(inst)
-                        if int((delta > 40).sum()) > max(200, int(0.002 * img_px)):
-                            for p in _split_giant_to_motifs(
-                                rgb,
-                                delta,
-                                max_pieces=8,
-                                min_area=max(100, int(0.001 * img_px)),
-                            ):
-                                if len(kept) >= min(max_instances, 22):
-                                    break
-                                kept.append(p)
-                        continue
-                    inst.bbox_norm = [
-                        x0 / w,
-                        y0 / h,
-                        (x1 - x0) / w,
-                        (y1 - y0) / h,
-                    ]
-                    kept.append(inst)
+                # Keep absorb gains; only split newcomers/layers that went giant
+                kept = [inst for inst in filled if inst.id in before_ids]
                 newcomers = [inst for inst in filled if inst.id not in before_ids]
-                filled = kept
-                for inst in newcomers:
-                    if len(filled) >= min(max_instances, 22):
-                        break
+                filled = []
+                for inst in kept + newcomers:
                     ys, xs = np.where(inst.mask > 20)
-                    if len(xs) < 60:
+                    if len(xs) < 40:
                         continue
                     x0, x1 = int(xs.min()), int(xs.max()) + 1
                     y0, y1 = int(ys.min()), int(ys.max()) + 1
                     bbox_frac = ((x1 - x0) / w) * ((y1 - y0) / h)
                     mask_frac = float(len(xs)) / img_px
-                    if mask_frac > 0.08 or bbox_frac > 0.15:
+                    if mask_frac > 0.10 or bbox_frac > 0.22:
                         for p in _split_giant_to_motifs(
                             rgb,
                             inst.mask,
                             max_pieces=8,
                             min_area=max(100, int(0.001 * img_px)),
                         ):
-                            if len(filled) >= min(max_instances, 22):
+                            if len(filled) >= min(max_instances, 24):
                                 break
                             filled.append(p)
                         continue
-                    inst.confidence = min(float(inst.confidence), 0.55)
+                    if inst.id not in before_ids:
+                        inst.confidence = min(float(inst.confidence), 0.55)
+                    inst.bbox_norm = [
+                        x0 / w,
+                        y0 / h,
+                        (x1 - x0) / w,
+                        (y1 - y0) / h,
+                    ]
                     filled.append(inst)
                 meta["topup_coverage_before"] = round(cov_f, 4)
             # Final canvas-giant guard — split glued leftovers into basins
             final: list[MotifInstance] = []
-            layer_cap = min(max_instances, 22)
+            layer_cap = min(max_instances, 24)
             for inst in filled:
                 ys, xs = np.where(inst.mask > 20)
                 if len(xs) == 0:
@@ -1628,7 +1582,7 @@ def _hybrid_residual_fill(
             for inst in final:
                 union_f |= inst.mask > 40
             cov_f = float((union_f & ink0).sum()) / max(1, int(ink0.sum()))
-            if cov_f < 0.58:
+            if cov_f < 0.55:
                 pre_fringe = {inst.id: inst.mask.copy() for inst in final}
                 soft3 = np.clip((_dist - 7.0) / 15.0, 0, 1)
                 _cv_residual_gapfill(
@@ -1637,10 +1591,10 @@ def _hybrid_residual_fill(
                     final,
                     bg=bg,
                     max_instances=len(final),  # absorb only
-                    min_area=max(500, int(0.01 * h * w)),
-                    max_rounds=2,
-                    target_coverage=0.62,
-                    absorb_dilate=7,
+                    min_area=max(80, int(0.0008 * h * w)),
+                    max_rounds=1,
+                    target_coverage=0.58,
+                    absorb_dilate=4,
                     absorb_any_touch=False,
                 )
                 # Reject absorb that balloons a layer into a giant

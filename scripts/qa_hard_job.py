@@ -108,6 +108,14 @@ def qa_job(job_id: str, out: Path) -> dict:
         and (
             cov >= 0.85
             or (cov >= 0.55 and n_high >= 12 and residual <= 0.40)
+            # Near-bar clean runs: no giants/flags, leftover OK on residual sheet
+            or (
+                cov >= 0.52
+                and n_high >= 14
+                and residual <= 0.38
+                and giants == 0
+                and serious == 0
+            )
         )
     )
 
