@@ -64,8 +64,13 @@ def qa_job(job_id: str, out: Path) -> dict:
             flags.append("border_bleed")
         if opaque < 0.03 and area_frac < 0.015:
             flags.append("tiny")
-        # Large bbox with low/medium fill = multi-motif glue (mustard m013)
-        if area_frac > 0.17 and (opaque < 0.50 or n >= 3):
+        # Large bbox with low fill = multi-motif glue (mustard m013).
+        # Fenestrated whole leaves can sit ~0.45–0.50 opaque with one dominant CC.
+        if area_frac > 0.17 and (
+            opaque < 0.40
+            or (opaque < 0.48 and main_frac < 0.92)
+            or (opaque < 0.50 and n >= 3 and sizes[1] > 0.18 * max(1, sizes[0]))
+        ):
             flags.append("sparse_giant")
         serious_flags = {"huge_area", "sparse_giant", "border_bleed", "multi_motif"}
         if any(f in serious_flags for f in flags) and "multi_motif" in flags and area_frac < 0.03:

@@ -734,6 +734,55 @@ def boxes_to_instances_graphic(
             m[(maxv > 40) & (winner != k)] = 0
             accepted_gem[i] = m
 
+    # Heal competition nicks + fenestration islands; drop multi-motif leftovers
+    close_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    ink_full = dist_bg > 11.0
+    healed_gem: dict[int, np.ndarray] = {}
+    for i, g in list(accepted_gem.items()):
+        solid = (g > 40).astype(np.uint8)
+        healed = cv2.morphologyEx(solid, cv2.MORPH_CLOSE, close_k, iterations=2)
+        healed = (healed > 0) & ink_full
+        # Keep seed-owned CC only (after close reconnects fenestrations)
+        lab_n, lab = cv2.connectedComponents(healed.astype(np.uint8), 8)
+        cx, cy = centers[i]
+        lid = int(lab[cy, cx]) if 0 <= cy < h and 0 <= cx < w and lab[cy, cx] > 0 else 0
+        if lid <= 0 and lab_n > 1:
+            areas = [(int((lab == j).sum()), j) for j in range(1, lab_n)]
+            areas.sort(reverse=True)
+            lid = areas[0][1] if areas else 0
+        if lid > 0:
+            healed = lab == lid
+        # Reject if still sparse-giant or multi-seed after heal
+        ys, xs = np.where(healed)
+        if len(xs) < 40:
+            need_ws.append(i)
+            continue
+        x0, x1 = int(xs.min()), int(xs.max()) + 1
+        y0, y1 = int(ys.min()), int(ys.max()) + 1
+        bbox_frac = ((x1 - x0) / w) * ((y1 - y0) / h)
+        mask_frac = float(len(xs)) / img_px
+        opaque = mask_frac / max(bbox_frac, 1e-6)
+        seeds_hit = sum(
+            1
+            for j, (sx, sy) in enumerate(centers)
+            if j != i and 0 <= sy < h and 0 <= sx < w and healed[sy, sx]
+        )
+        if seeds_hit >= 1 or (bbox_frac > 0.18 and opaque < 0.48):
+            print(
+                f"    gemini heal-reject {boxes[i].id}: "
+                f"bbox={bbox_frac:.2f} opaque={opaque:.2f} seeds={seeds_hit}"
+            )
+            need_ws.append(i)
+            continue
+        out = np.zeros_like(g)
+        out[healed] = np.maximum(g[healed], 220)
+        healed_gem[i] = out
+    accepted_gem = healed_gem
+    # Refresh watershed for newly rejected
+    for i in need_ws:
+        if i in ws_all and i not in accepted_gem:
+            ws_instances[i] = ws_all[i]
+
     instances: list[MotifInstance] = []
     gemini_kept = 0
     for i, b in enumerate(boxes):
@@ -1201,12 +1250,18 @@ def _hybrid_residual_fill(
                 min_area = max(250, int(0.0028 * h * w))
                 rounds = 2
                 fill_cap = min(max_instances, n_primary + 4)
-            elif n_primary >= 8:
-                # Low primary coverage → more single-CC residual layers, not glue
+            elif n_primary >= 8 and primary_cov0 >= 0.50:
+                # Mid coverage → moderate single-CC residual layers
                 target = 0.90
                 min_area = max(160, int(0.0018 * h * w))
                 rounds = 3
                 fill_cap = min(max_instances, n_primary + 8)
+            elif n_primary >= 8:
+                # Weak Gemini primary → denser single-CC residual to hit ≥0.55 cov
+                target = 0.92
+                min_area = max(120, int(0.0012 * h * w))
+                rounds = 3
+                fill_cap = min(max_instances, n_primary + 12)
             else:
                 target = 0.97
                 min_area = max(60, int(0.0006 * h * w))
