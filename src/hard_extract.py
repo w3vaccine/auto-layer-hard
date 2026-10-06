@@ -752,7 +752,24 @@ def boxes_to_instances_graphic(
             lid = areas[0][1] if areas else 0
         if lid > 0:
             healed = lab == lid
-        # Reject if still sparse-giant or multi-seed after heal
+        # Punch other seed neighborhoods (don't reject whole leaf — that gutted cov)
+        for j, (sx, sy) in enumerate(centers):
+            if j == i or not (0 <= sy < h and 0 <= sx < w):
+                continue
+            if healed[sy, sx]:
+                y0p, y1p = max(0, sy - 6), min(h, sy + 7)
+                x0p, x1p = max(0, sx - 6), min(w, sx + 7)
+                healed[y0p:y1p, x0p:x1p] = False
+        # Re-keep largest seed CC after punch
+        lab_n, lab = cv2.connectedComponents(healed.astype(np.uint8), 8)
+        cx, cy = centers[i]
+        lid = int(lab[cy, cx]) if 0 <= cy < h and 0 <= cx < w and lab[cy, cx] > 0 else 0
+        if lid <= 0 and lab_n > 1:
+            areas = [(int((lab == j).sum()), j) for j in range(1, lab_n)]
+            areas.sort(reverse=True)
+            lid = areas[0][1] if areas else 0
+        if lid > 0:
+            healed = lab == lid
         ys, xs = np.where(healed)
         if len(xs) < 40:
             need_ws.append(i)
@@ -762,15 +779,11 @@ def boxes_to_instances_graphic(
         bbox_frac = ((x1 - x0) / w) * ((y1 - y0) / h)
         mask_frac = float(len(xs)) / img_px
         opaque = mask_frac / max(bbox_frac, 1e-6)
-        seeds_hit = sum(
-            1
-            for j, (sx, sy) in enumerate(centers)
-            if j != i and 0 <= sy < h and 0 <= sx < w and healed[sy, sx]
-        )
-        if seeds_hit >= 1 or (bbox_frac > 0.18 and opaque < 0.48):
+        # Only reject true sparse glue after heal (keep huge fenestrated leaves)
+        if bbox_frac > 0.22 and opaque < 0.38:
             print(
                 f"    gemini heal-reject {boxes[i].id}: "
-                f"bbox={bbox_frac:.2f} opaque={opaque:.2f} seeds={seeds_hit}"
+                f"bbox={bbox_frac:.2f} opaque={opaque:.2f}"
             )
             need_ws.append(i)
             continue
@@ -1392,6 +1405,86 @@ def _hybrid_residual_fill(
                     continue
                 pruned.append(inst)
             filled = pruned
+            # Coverage top-up: spawn more single-CC leftovers if still under bar
+            union_f = np.zeros((h, w), dtype=bool)
+            for inst in filled:
+                union_f |= inst.mask > 40
+            cov_f = float((union_f & ink0).sum()) / max(1, int(ink0.sum()))
+            if cov_f < 0.58 and len(filled) < fill_cap:
+                print(f"  residual top-up — coverage {cov_f:.3f} < 0.58")
+                soft2 = np.clip((_dist - 6.0) / 14.0, 0, 1)
+                before_ids = {inst.id for inst in filled}
+                _cv_residual_gapfill(
+                    rgb,
+                    soft2,
+                    filled,
+                    bg=bg,
+                    max_instances=min(max_instances, fill_cap + 4),
+                    min_area=max(90, int(0.0009 * h * w)),
+                    max_rounds=2,
+                    target_coverage=0.70,
+                    absorb_dilate=3,
+                    absorb_any_touch=False,
+                )
+                # Gapfill mutates `filled`; filter newly appended pieces
+                kept = [inst for inst in filled if inst.id in before_ids]
+                newcomers = [inst for inst in filled if inst.id not in before_ids]
+                filled = kept
+                for inst in newcomers:
+                    if len(filled) >= min(max_instances, 22):
+                        break
+                    ys, xs = np.where(inst.mask > 20)
+                    if len(xs) < 60:
+                        continue
+                    x0, x1 = int(xs.min()), int(xs.max()) + 1
+                    y0, y1 = int(ys.min()), int(ys.max()) + 1
+                    bbox_frac = ((x1 - x0) / w) * ((y1 - y0) / h)
+                    mask_frac = float(len(xs)) / img_px
+                    if mask_frac > 0.05 or bbox_frac > 0.10:
+                        solid = (inst.mask > 40).astype(np.uint8)
+                        n_cc, lab = cv2.connectedComponents(solid, 8)
+                        for j in range(1, n_cc):
+                            if len(filled) >= min(max_instances, 22):
+                                break
+                            comp = lab == j
+                            if int(comp.sum()) < max(80, int(0.001 * img_px)):
+                                continue
+                            cys, cxs = np.where(comp)
+                            cx0, cx1 = int(cxs.min()), int(cxs.max()) + 1
+                            cy0, cy1 = int(cys.min()), int(cys.max()) + 1
+                            c_bbox = ((cx1 - cx0) / w) * ((cy1 - cy0) / h)
+                            if c_bbox > 0.10 or int(comp.sum()) / img_px > 0.05:
+                                continue
+                            filled.append(
+                                MotifInstance(
+                                    id=f"{inst.id}_t{j}",
+                                    label="motif",
+                                    bbox_norm=[
+                                        cx0 / w,
+                                        cy0 / h,
+                                        (cx1 - cx0) / w,
+                                        (cy1 - cy0) / h,
+                                    ],
+                                    confidence=0.52,
+                                    mask=np.where(comp, inst.mask, 0).astype(
+                                        np.uint8
+                                    ),
+                                    pass_index=30,
+                                )
+                            )
+                        continue
+                    solid = (inst.mask > 40).astype(np.uint8)
+                    n_cc, lab = cv2.connectedComponents(solid, 8)
+                    if n_cc > 2:
+                        sizes = sorted(
+                            (int((lab == j).sum()) for j in range(1, n_cc)),
+                            reverse=True,
+                        )
+                        if len(sizes) >= 2 and sizes[1] > 0.15 * sizes[0]:
+                            continue
+                    inst.confidence = min(float(inst.confidence), 0.55)
+                    filled.append(inst)
+                meta["topup_coverage_before"] = round(cov_f, 4)
             meta["fill_cap"] = fill_cap
             meta["min_area"] = min_area
             meta["dropped_giant_residual"] = dropped_giant
