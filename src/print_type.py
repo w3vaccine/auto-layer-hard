@@ -130,6 +130,11 @@ def classify_print(image: Image.Image) -> PrintTypeResult:
         # (tropical leaves / florals on dark ground get false camo scores)
         if busy >= 0.85 and ink_frac >= 0.45:
             print_type, conf, reason_tag = "busy", busy, "busy_over_false_camo"
+        elif soft < 0.2 and ink_frac >= 0.5:
+            # Sharp interlocking graphics (mustard tropical etc.) score as camo
+            # because same-hue overlaps, but they need VLM whole-motif busy path —
+            # CV camo shatters them into hundreds of uncertain fragments.
+            print_type, conf, reason_tag = "busy", max(busy, 0.72), "sharp_graphic_over_camo"
         else:
             print_type, conf, reason_tag = "camo", camo, "camo_over_soft"
     elif soft >= 0.55 and clean < 0.75:
@@ -222,8 +227,13 @@ def classify_print_routed(
     vlm = classify_print_vlm(image, api_key=api_key, model=model)
     if vlm is None:
         return base
-    # Trust VLM for camo/soft when it is confident
-    if vlm.print_type in ("camo", "soft") and vlm.confidence >= 0.55:
+    # Trust VLM for camo/soft when it is confident — but not when heuristic
+    # already marked a sharp graphic as busy (VLM often says camo for tropicals).
+    if (
+        vlm.print_type in ("camo", "soft")
+        and vlm.confidence >= 0.55
+        and not (base.print_type == "busy" and "sharp_graphic" in (base.reason or ""))
+    ):
         return PrintTypeResult(
             print_type=vlm.print_type,
             confidence=vlm.confidence,
