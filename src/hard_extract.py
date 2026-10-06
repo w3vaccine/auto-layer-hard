@@ -1147,6 +1147,84 @@ def _union_alpha(instances: list[MotifInstance], h: int, w: int) -> np.ndarray:
     return union
 
 
+def _split_giant_to_motifs(
+    rgb: np.ndarray,
+    mask: np.ndarray,
+    *,
+    max_pieces: int = 10,
+    min_area: int = 400,
+) -> list[MotifInstance]:
+    """Split a glued residual/giant mask into watershed basins (single motifs)."""
+    h, w = rgb.shape[:2]
+    solid = (mask > 40).astype(np.uint8)
+    if int(solid.sum()) < min_area:
+        return []
+    # Seed from distance peaks inside the giant
+    dist = cv2.distanceTransform(solid, cv2.DIST_L2, 5)
+    # Suppress shallow peaks
+    thr = max(3.0, float(dist.max()) * 0.35)
+    peaks = (dist >= thr).astype(np.uint8)
+    n_lab, lab = cv2.connectedComponents(peaks, 8)
+    markers = np.zeros((h, w), dtype=np.int32)
+    markers[solid == 0] = 1  # background
+    seed_ids: list[int] = []
+    # Rank peak components by distance at their max
+    scored: list[tuple[float, int]] = []
+    for j in range(1, n_lab):
+        comp = lab == j
+        scored.append((float(dist[comp].max()), j))
+    scored.sort(reverse=True)
+    for k, (_, j) in enumerate(scored[:max_pieces], start=2):
+        comp = lab == j
+        # marker at peak centroid
+        ys, xs = np.where(comp)
+        if len(xs) == 0:
+            continue
+        cy, cx = int(ys.mean()), int(xs.mean())
+        markers[cy, cx] = k
+        seed_ids.append(k)
+    if len(seed_ids) < 2:
+        # Fallback: grid seeds inside mask
+        ys, xs = np.where(solid > 0)
+        if len(xs) == 0:
+            return []
+        for k, idx in enumerate(
+            np.linspace(0, len(xs) - 1, num=min(max_pieces, 8), dtype=int), start=2
+        ):
+            markers[int(ys[idx]), int(xs[idx])] = k
+            seed_ids.append(k)
+    if len(seed_ids) < 2:
+        return []
+    ws = rgb.copy()
+    cv2.watershed(ws, markers)
+    out: list[MotifInstance] = []
+    for k in seed_ids:
+        basin = (markers == k) & (solid > 0)
+        area = int(basin.sum())
+        if area < min_area:
+            continue
+        alpha = np.where(basin, np.maximum(mask, 220), 0).astype(np.uint8)
+        ys, xs = np.where(alpha > 20)
+        if len(xs) == 0:
+            continue
+        x0, x1 = int(xs.min()), int(xs.max()) + 1
+        y0, y1 = int(ys.min()), int(ys.max()) + 1
+        bbox_frac = ((x1 - x0) / w) * ((y1 - y0) / h)
+        if bbox_frac > 0.18 or area / float(h * w) > 0.08:
+            continue
+        out.append(
+            MotifInstance(
+                id=f"ws{k}",
+                label="motif",
+                bbox_norm=[x0 / w, y0 / h, (x1 - x0) / w, (y1 - y0) / h],
+                confidence=0.55,
+                mask=alpha,
+                pass_index=31,
+            )
+        )
+    return out
+
+
 def _merge_touching_small(
     instances: list[MotifInstance],
     *,
@@ -1414,6 +1492,7 @@ def _hybrid_residual_fill(
                 print(f"  residual top-up — coverage {cov_f:.3f} < 0.58")
                 soft2 = np.clip((_dist - 6.0) / 14.0, 0, 1)
                 before_ids = {inst.id for inst in filled}
+                pre_top_masks = {inst.id: inst.mask.copy() for inst in filled}
                 _cv_residual_gapfill(
                     rgb,
                     soft2,
@@ -1423,11 +1502,61 @@ def _hybrid_residual_fill(
                     min_area=max(90, int(0.0009 * h * w)),
                     max_rounds=2,
                     target_coverage=0.70,
-                    absorb_dilate=3,
+                    absorb_dilate=5,
                     absorb_any_touch=False,
                 )
-                # Gapfill mutates `filled`; filter newly appended pieces
-                kept = [inst for inst in filled if inst.id in before_ids]
+                # Keep coverage gains on newcomers; revert primaries swollen into giants
+                kept = []
+                for inst in filled:
+                    if inst.id not in before_ids:
+                        continue
+                    ys, xs = np.where(inst.mask > 20)
+                    if len(xs) == 0:
+                        continue
+                    x0, x1 = int(xs.min()), int(xs.max()) + 1
+                    y0, y1 = int(ys.min()), int(ys.max()) + 1
+                    bbox_frac = ((x1 - x0) / w) * ((y1 - y0) / h)
+                    mask_frac = float(len(xs)) / img_px
+                    if (
+                        inst.id in pre_top_masks
+                        and (mask_frac > 0.10 or bbox_frac > 0.22)
+                    ):
+                        # Capture absorbed ink, revert primary, split the delta
+                        delta = np.where(
+                            (inst.mask > 40) & (pre_top_masks[inst.id] <= 40),
+                            inst.mask,
+                            0,
+                        ).astype(np.uint8)
+                        inst.mask = pre_top_masks[inst.id]
+                        ys, xs = np.where(inst.mask > 20)
+                        if len(xs):
+                            x0, x1 = int(xs.min()), int(xs.max()) + 1
+                            y0, y1 = int(ys.min()), int(ys.max()) + 1
+                            inst.bbox_norm = [
+                                x0 / w,
+                                y0 / h,
+                                (x1 - x0) / w,
+                                (y1 - y0) / h,
+                            ]
+                        kept.append(inst)
+                        if int((delta > 40).sum()) > max(200, int(0.002 * img_px)):
+                            for p in _split_giant_to_motifs(
+                                rgb,
+                                delta,
+                                max_pieces=8,
+                                min_area=max(100, int(0.001 * img_px)),
+                            ):
+                                if len(kept) >= min(max_instances, 22):
+                                    break
+                                kept.append(p)
+                        continue
+                    inst.bbox_norm = [
+                        x0 / w,
+                        y0 / h,
+                        (x1 - x0) / w,
+                        (y1 - y0) / h,
+                    ]
+                    kept.append(inst)
                 newcomers = [inst for inst in filled if inst.id not in before_ids]
                 filled = kept
                 for inst in newcomers:
@@ -1440,51 +1569,55 @@ def _hybrid_residual_fill(
                     y0, y1 = int(ys.min()), int(ys.max()) + 1
                     bbox_frac = ((x1 - x0) / w) * ((y1 - y0) / h)
                     mask_frac = float(len(xs)) / img_px
-                    if mask_frac > 0.05 or bbox_frac > 0.10:
-                        solid = (inst.mask > 40).astype(np.uint8)
-                        n_cc, lab = cv2.connectedComponents(solid, 8)
-                        for j in range(1, n_cc):
+                    if mask_frac > 0.08 or bbox_frac > 0.15:
+                        for p in _split_giant_to_motifs(
+                            rgb,
+                            inst.mask,
+                            max_pieces=8,
+                            min_area=max(100, int(0.001 * img_px)),
+                        ):
                             if len(filled) >= min(max_instances, 22):
                                 break
-                            comp = lab == j
-                            if int(comp.sum()) < max(80, int(0.001 * img_px)):
-                                continue
-                            cys, cxs = np.where(comp)
-                            cx0, cx1 = int(cxs.min()), int(cxs.max()) + 1
-                            cy0, cy1 = int(cys.min()), int(cys.max()) + 1
-                            c_bbox = ((cx1 - cx0) / w) * ((cy1 - cy0) / h)
-                            if c_bbox > 0.10 or int(comp.sum()) / img_px > 0.05:
-                                continue
-                            filled.append(
-                                MotifInstance(
-                                    id=f"{inst.id}_t{j}",
-                                    label="motif",
-                                    bbox_norm=[
-                                        cx0 / w,
-                                        cy0 / h,
-                                        (cx1 - cx0) / w,
-                                        (cy1 - cy0) / h,
-                                    ],
-                                    confidence=0.52,
-                                    mask=np.where(comp, inst.mask, 0).astype(
-                                        np.uint8
-                                    ),
-                                    pass_index=30,
-                                )
-                            )
+                            filled.append(p)
                         continue
-                    solid = (inst.mask > 40).astype(np.uint8)
-                    n_cc, lab = cv2.connectedComponents(solid, 8)
-                    if n_cc > 2:
-                        sizes = sorted(
-                            (int((lab == j).sum()) for j in range(1, n_cc)),
-                            reverse=True,
-                        )
-                        if len(sizes) >= 2 and sizes[1] > 0.15 * sizes[0]:
-                            continue
                     inst.confidence = min(float(inst.confidence), 0.55)
                     filled.append(inst)
                 meta["topup_coverage_before"] = round(cov_f, 4)
+            # Final canvas-giant guard — split glued leftovers into basins
+            final: list[MotifInstance] = []
+            for inst in filled:
+                ys, xs = np.where(inst.mask > 20)
+                if len(xs) == 0:
+                    continue
+                x0, x1 = int(xs.min()), int(xs.max()) + 1
+                y0, y1 = int(ys.min()), int(ys.max()) + 1
+                bbox_frac = ((x1 - x0) / w) * ((y1 - y0) / h)
+                mask_frac = float(len(xs)) / img_px
+                if mask_frac > 0.12 or bbox_frac > 0.35:
+                    print(
+                        f"  split canvas giant {inst.id}: "
+                        f"mask={mask_frac:.2f} bbox={bbox_frac:.2f}"
+                    )
+                    pieces = _split_giant_to_motifs(
+                        rgb,
+                        inst.mask,
+                        max_pieces=min(10, max(2, fill_cap - len(final))),
+                        min_area=max(120, int(0.001 * img_px)),
+                    )
+                    dropped_giant += 1
+                    for p in pieces:
+                        if len(final) >= min(max_instances, 22):
+                            break
+                        final.append(p)
+                    continue
+                inst.bbox_norm = [
+                    x0 / w,
+                    y0 / h,
+                    (x1 - x0) / w,
+                    (y1 - y0) / h,
+                ]
+                final.append(inst)
+            filled = final
             meta["fill_cap"] = fill_cap
             meta["min_area"] = min_area
             meta["dropped_giant_residual"] = dropped_giant
