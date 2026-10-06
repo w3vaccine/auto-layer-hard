@@ -1241,16 +1241,16 @@ def _hybrid_residual_fill(
                 if is_residual and (mask_frac > 0.06 or bbox_frac > 0.11 or multi):
                     dropped_giant += 1
                     continue
-                # Swollen primaries (absorb glue) — mustard m013
-                if mask_frac > 0.12 or bbox_frac > 0.16 or (multi and bbox_frac > 0.06):
+                # Extreme size only for primaries (absorb can swell them slightly)
+                if mask_frac > 0.14 or bbox_frac > 0.22:
                     dropped_giant += 1
                     continue
-                # Fragmented / shard layers (mustard m009/m013)
+                # Fragmented shards — residual only (don't gut Gemini primaries)
                 main_frac = sizes[0] / max(1, sum(sizes)) if sizes else 1.0
-                if main_frac < 0.65 and (multi or n_cc > 8):
+                if is_residual and main_frac < 0.65 and (multi or n_cc > 8):
                     dropped_giant += 1
                     continue
-                if mask_frac < 0.0025 and n_cc > 5:
+                if is_residual and mask_frac < 0.0025 and n_cc > 5:
                     dropped_giant += 1
                     continue
                 pruned.append(inst)
