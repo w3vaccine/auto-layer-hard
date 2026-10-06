@@ -126,13 +126,22 @@ def _trim_alpha(rgba: np.ndarray, pad: int = 2) -> tuple[np.ndarray, tuple[int, 
     return rgba[y0:y1, x0:x1], (x0, y0, x1 - x0, y1 - y0)
 
 
+# Bakeoff winner on mustard tropical (3 hard crops × 7 prompts):
+# short white-bg cutout >> asking for real alpha (models fake alpha / keep neighbors).
+_GEMINI_EXTRACT_PROMPT = (
+    "Cut out only the centered {label} on pure white #FFFFFF. "
+    "Delete all other leaves even if they overlap the subject. "
+    "Holes white. No checkerboard. Keep original colors."
+)
+
+
 def _gemini_extract_crop(
     crop_rgb: Image.Image,
     label: str,
     api_key: str | None,
     model: str = "gemini-2.5-flash-image",
 ) -> np.ndarray | None:
-    """Ask Gemini to return a transparent cutout of ONE motif; best-effort."""
+    """Ask Gemini for a white-bg single-motif cutout; rebuild alpha locally."""
     try:
         from google import genai
         from google.genai import types
@@ -140,17 +149,8 @@ def _gemini_extract_crop(
         client = genai.Client(api_key=api_key) if api_key else genai.Client()
         buf = BytesIO()
         crop_rgb.save(buf, format="PNG")
-        prompt = (
-            f"You are cutting a single textile motif for a layers menu.\n"
-            f"Subject: {label or 'the primary motif'} nearest the center of this crop.\n\n"
-            "Output requirements:\n"
-            "- PNG with a REAL alpha channel (alpha=0 = transparent). "
-            "Never draw a checkerboard, grid, or fake transparency pattern.\n"
-            "- Keep ONLY that one complete motif. Exclude every neighboring leaf/frond/flower "
-            "even if it overlaps or sits behind the subject.\n"
-            "- Natural holes (e.g. monstera fenestrations) must be transparent, not filled.\n"
-            "- Preserve original print colors and edges. No shadows, outlines, or new pixels.\n"
-            "- If unsure which motif is primary, pick the largest one touching the crop center."
+        prompt = _GEMINI_EXTRACT_PROMPT.format(
+            label=label or "primary motif"
         )
         resp = client.models.generate_content(
             model=model,
@@ -178,6 +178,13 @@ def _gemini_extract_crop(
     return None
 
 
+def _alpha_from_white_bg(rgb: np.ndarray) -> np.ndarray:
+    """Build soft alpha from distance to pure white (white-bg cutout path)."""
+    d = np.sqrt(((rgb.astype(np.float32) - 255.0) ** 2).sum(axis=2))
+    # Near-white → transparent; ink stays opaque
+    return np.clip((d - 8.0) / 18.0, 0, 1)
+
+
 def _ensure_cutout_alpha(rgba: np.ndarray, crop_rgb: np.ndarray) -> np.ndarray | None:
     """Normalize Gemini cutout alpha; return None if the model faked transparency."""
     out = rgba.copy()
@@ -189,25 +196,32 @@ def _ensure_cutout_alpha(rgba: np.ndarray, crop_rgb: np.ndarray) -> np.ndarray |
         print("    gemini reject: checkerboard/fake transparency")
         return None
 
-    if float(a.mean()) >= 240:
-        # Opaque output — rebuild alpha from crop border color + kill near-white
-        h, w = out.shape[:2]
-        b = max(2, min(6, h // 16, w // 16))
-        border = np.concatenate(
-            [
-                crop_rgb[:b].reshape(-1, 3),
-                crop_rgb[-b:].reshape(-1, 3),
-                crop_rgb[:, :b].reshape(-1, 3),
-                crop_rgb[:, -b:].reshape(-1, 3),
-            ],
-            axis=0,
-        ).astype(np.float32)
-        bg = np.median(border, axis=0)
-        d = np.sqrt(((rgb - bg) ** 2).sum(axis=2))
-        white = rgb.mean(axis=2)
-        alpha = np.clip((d - 12.0) / 20.0, 0, 1)
-        alpha[white > 245] = 0
+    white_frac = float((rgb.min(axis=2) > 245).mean())
+    # Preferred path: model put subject on #FFF — rebuild alpha from white
+    if white_frac >= 0.20 or float(a.mean()) >= 240:
+        alpha = _alpha_from_white_bg(rgb)
+        # If white-bg rebuild collapses (almost nothing left), fall back to border matte
+        if float((alpha > 0.5).mean()) < 0.02:
+            h, w = out.shape[:2]
+            b = max(2, min(6, h // 16, w // 16))
+            border = np.concatenate(
+                [
+                    crop_rgb[:b].reshape(-1, 3),
+                    crop_rgb[-b:].reshape(-1, 3),
+                    crop_rgb[:, :b].reshape(-1, 3),
+                    crop_rgb[:, -b:].reshape(-1, 3),
+                ],
+                axis=0,
+            ).astype(np.float32)
+            bg = np.median(border, axis=0)
+            d = np.sqrt(((rgb - bg) ** 2).sum(axis=2))
+            alpha = np.clip((d - 12.0) / 20.0, 0, 1)
+            alpha[rgb.mean(axis=2) > 245] = 0
         out[:, :, 3] = (alpha * 255).astype(np.uint8)
+        # Reject if still nearly full-frame (failed to isolate)
+        if float((out[:, :, 3] > 128).mean()) > 0.85:
+            print("    gemini reject: cutout still full-frame")
+            return None
     return out
 
 
