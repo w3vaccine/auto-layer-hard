@@ -30,22 +30,11 @@ Optional smoke (no server):
 # → out/smoke_handoff/smoke_report.json
 ```
 
-`GOOGLE_API_KEY` is optional for the local CV path. The hard path (soft / camo / busy → Gemini boxes → SAM2) needs the key.
+`GOOGLE_API_KEY` is optional (tile gapfill / Gemini inpaint only). Default CV path needs no key. Hard path (soft/camo/busy) needs the key.
 
----
+### Render
 
-## Render (hard path)
-
-The image in `docker/Dockerfile` is CPU PyTorch + SAM2-B, and the server listens on `$PORT`.
-
-1. Push this folder to a git remote Render can see.
-2. New **Web Service** → Docker.
-3. **Root Directory** `auto-layer-poc` if the repo is the whole workspace. Dockerfile path: `docker/Dockerfile`.
-4. Instance **Pro (4 GB)**. SAM2-B does not fit Render’s 512 MB starter. Standard (2 GB) often OOMs mid-mask.
-5. Environment: `GOOGLE_API_KEY` (required for the hard path). `render.yaml` lists the rest.
-6. Open the service URL. **Auto route** stays on CV for clean prints and uses VLM → SAM2 for soft, camo, and busy.
-
-`GET /health` returns `{"ok": true}`. A hard-path job still takes minutes on CPU; the request itself returns a job id and the page polls. Job files live on the instance disk and disappear when the service restarts.
+Docker image: `docker/Dockerfile` (CPU torch + sam2_b). Needs Pro / 4GB. Set `GOOGLE_API_KEY`. Blueprint: `render.yaml`. Health: `GET /health`.
 
 ---
 

@@ -1,5 +1,3 @@
-# Render Blueprint. Set the service Root Directory to this folder
-# (auto-layer-poc) if the git repo is the whole MaketheDot workspace.
 services:
   - type: web
     name: auto-layer-hard

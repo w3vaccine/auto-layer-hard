@@ -936,7 +936,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def _preload_sam() -> None:
-    """Load SAM2 after the port is bound so Render's health check can pass."""
+    """Warm SAM2 in the background after bind."""
     try:
         from sam_refine import _get_sam
 

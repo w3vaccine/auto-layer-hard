@@ -9,7 +9,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# CPU wheels. Do not pip-install torch from PyPI — that pulls the CUDA build.
 RUN pip install --no-cache-dir \
         torch torchvision --index-url https://download.pytorch.org/whl/cpu \
     && pip install --no-cache-dir \
@@ -21,7 +20,6 @@ RUN pip install --no-cache-dir \
         "ultralytics>=8.3.0" \
     && python -c "import torch; assert '+cpu' in torch.__version__, torch.__version__"
 
-# Hard path (VLM boxes → SAM2). Baked in so the first request does not download.
 RUN curl -fsSL -o /app/sam2_b.pt \
         https://github.com/ultralytics/assets/releases/download/v8.3.0/sam2_b.pt \
     && test "$(stat -c%s /app/sam2_b.pt)" -gt 100000000
