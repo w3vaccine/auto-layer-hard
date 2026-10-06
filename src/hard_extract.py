@@ -48,17 +48,18 @@ Return ONLY JSON:
 bbox_norm = [x,y,w,h] normalized 0..1."""
 
 BUSY_PROMPT = """You are analyzing a dense textile print (leaves, florals, paisley, interlocking motifs).
-Find each COMPLETE primary motif — one full leaf, one full flower, one full paisley.
+Find EACH complete primary motif as its OWN box — one full leaf, one full flower, one full palm frond, one paisley.
 
 Hard rules:
-- WHOLE motif: box must cover the entire leaf/flower from tip to stem base (or petal edge to center). Never box only a tip, vein fragment, hole, or edge nick.
-- Prefer fewer complete motifs over many tiny fragments.
-- Separate overlapping leaves into distinct boxes (each full leaf gets its own box).
-- Skip ultra-tiny noise (< ~0.2% of image) and continuous background.
-- Do not return one giant full-image box.
+- WHOLE motif: box covers the entire leaf/flower/frond (tip through stem). Never box only a tip, vein, hole, or edge nick.
+- Overlapping motifs = separate boxes (do NOT merge a monstera with the palm behind it).
+- Typical prints have 8–40 primary motifs. Return as many complete ones as you clearly see.
+- Skip ultra-tiny noise (< ~0.2% of image) and continuous background/ground.
+- NEVER return a box covering more than ~30% of the image, and NEVER one full-image box.
+- Prefer tight boxes with little empty ground inside.
 
 Return ONLY JSON:
-{"motifs":[{"id":"m01","label":"leaf|flower|paisley|motif","bbox_norm":[x,y,w,h],"confidence":0.0_to_1.0}]}
+{"motifs":[{"id":"m01","label":"leaf|flower|frond|paisley|motif","bbox_norm":[x,y,w,h],"confidence":0.0_to_1.0}]}
 bbox_norm = [x,y,w,h] normalized 0..1."""
 
 
@@ -70,6 +71,15 @@ def _prompt_for(print_type: str) -> str:
     if print_type == "busy":
         return BUSY_PROMPT
     return SOFT_PROMPT
+
+
+def _filter_max_area(boxes: list[MotifBox], max_area: float = 0.32) -> list[MotifBox]:
+    """Drop full-image / giant boxes that ruin SAM (they swallow every motif)."""
+    kept = [b for b in boxes if b.area() <= max_area]
+    dropped = len(boxes) - len(kept)
+    if dropped:
+        print(f"  dropped {dropped} giant boxes (area>{max_area})")
+    return kept
 
 
 def _discover_boxes_typed(
@@ -103,40 +113,50 @@ def _discover_boxes_typed(
     if print_type == "camo":
         min_area = 0.0005
     boxes = _filter_min_area(boxes, min_area=min_area)
+    if print_type == "busy":
+        boxes = _filter_max_area(boxes, max_area=0.32)
     boxes = _dedupe(boxes, iou_thresh=0.4)
     print(f"  hard discover pass1 ({print_type}): {len(boxes)}")
 
-    # Latency budget: busy prints used to spend ~2 min on 4 Gemini passes alone.
-    # Cap passes hard; CV residual fill recovers coverage for missed motifs.
+    # Busy quality > raw speed: keep gapfilling until we have a real motif set.
+    # Latency stays OK because SAM is batched @512 and box count is capped.
     if print_type == "busy":
         try:
-            max_passes = max(1, int(os.environ.get("HARD_BUSY_GEMINI_PASSES", "1")))
+            max_passes = max(1, int(os.environ.get("HARD_BUSY_GEMINI_PASSES", "3")))
         except ValueError:
-            max_passes = 1
-        early_stop = 16
+            max_passes = 3
+        min_boxes = min(12, max_instances)
+        early_stop = max_instances
     elif print_type == "camo":
         max_passes = 3
+        min_boxes = 0
         early_stop = max_instances
     else:
         max_passes = 2
+        min_boxes = 0
         early_stop = max_instances
+
     for pass_index in range(2, max_passes + 1):
         if len(boxes) >= max_instances or len(boxes) >= early_stop:
             break
-        # Busy: optional 2nd pass only when pass1 was sparse
-        if print_type == "busy" and len(boxes) >= 10:
+        # Only early-exit busy once we have enough whole motifs
+        if print_type == "busy" and len(boxes) >= max(min_boxes, max_instances // 2):
             break
         overlay = ov(rgb, boxes)
         payload = _call_gemini(client, model, PASS_N_PROMPT, [rgb, overlay])
         new_boxes = _parse_motifs(payload, pass_index, id_offset=len(boxes))
         new_boxes = _filter_min_area(new_boxes, min_area=min_area * (0.7 if print_type == "camo" else 1.0))
+        if print_type == "busy":
+            new_boxes = _filter_max_area(new_boxes, max_area=0.32)
         before = len(boxes)
         boxes = _dedupe(boxes + new_boxes, iou_thresh=0.35 if print_type == "camo" else 0.4)[
             :max_instances
         ]
         gained = len(boxes) - before
         print(f"  hard discover pass {pass_index}: +{gained} (total {len(boxes)})")
-        if gained == 0:
+        if gained == 0 and len(boxes) >= min_boxes:
+            break
+        if gained == 0 and print_type != "busy":
             break
 
     for i, b in enumerate(boxes, start=1):
@@ -436,8 +456,16 @@ def boxes_to_instances_sam(
         print(f"  SAM2 done in {time.time() - t0:.1f}s")
 
     instances: list[MotifInstance] = []
+    img_px = float(h * w)
     for b, m in zip(boxes, sam_masks):
         box = _bbox_xyxy(b.bbox_norm, w, h, pad=0.03)
+        # Reject SAM masks that blew past the prompt box (whole-print grab)
+        if m is not None and int(m.sum()) >= 30:
+            mask_frac = float((m > 127).sum()) / img_px
+            box_frac = max(b.area() * 1.8, 0.02)
+            if mask_frac > min(0.45, max(0.12, box_frac * 4)):
+                print(f"  SAM reject {b.id}: mask {mask_frac:.1%} >> box {b.area():.1%}")
+                m = None
         if m is not None and int(m.sum()) >= 30:
             # IMPORTANT: no CV-ink intersection for camo/soft
             alpha = soft_alpha_from_sam(rgb, m, box, mode=mode)
@@ -445,6 +473,10 @@ def boxes_to_instances_sam(
             alpha = _color_matte_in_box(rgb, b.bbox_norm, soft=(mode == "soft"))
 
         if int((alpha > 20).sum()) < 20:
+            continue
+        # Also reject color-matte / alpha that covers most of the canvas
+        if float((alpha > 20).sum()) / img_px > 0.5:
+            print(f"  skip {b.id}: alpha covers >50% of image")
             continue
         ys, xs = np.where(alpha > 20)
         x0, x1 = int(xs.min()), int(xs.max()) + 1
@@ -664,9 +696,10 @@ def _hybrid_residual_fill(
         _dist, _mode = ink_distance(rgb, bg)
         soft = np.clip((_dist - 8.0) / 16.0, 0, 1)
         if print_type == "busy":
-            # Whole-motif priority: absorb aggressively; only large leftovers become layers
-            target = 0.90
-            min_area = max(80, int(0.0012 * h * w))
+            # Prefer NEW whole-motif layers over gluing leftovers into the few SAM seeds.
+            # absorb_any_touch=True was collapsing tropical/fox prints into 1–3 blobs.
+            target = 0.97
+            min_area = max(60, int(0.0006 * h * w))
             filled = _cv_residual_gapfill(
                 rgb,
                 soft,
@@ -674,12 +707,12 @@ def _hybrid_residual_fill(
                 bg=bg,
                 max_instances=max_instances,
                 min_area=min_area,
-                max_rounds=3,
+                max_rounds=4,
                 target_coverage=target,
-                absorb_dilate=21,
-                absorb_any_touch=True,
+                absorb_dilate=9,
+                absorb_any_touch=False,
             )
-            filled = _merge_touching_small(filled, min_keep_area=int(0.002 * h * w))
+            filled = _merge_touching_small(filled, min_keep_area=int(0.0008 * h * w))
         else:
             target = 0.985
             filled = _cv_residual_gapfill(
@@ -791,11 +824,11 @@ def discover_hard_motifs(
         return instances, meta
 
     # Busy: VLM+SAM primary motifs + CV residual fill
-    # Cap SAM prompts — each full-res CPU predict was ~10–13s; residual CV covers the rest.
+    # More SAM seeds = separable overlapping leaves; 512px batch keeps CPU under ~90s.
     try:
-        busy_box_cap = max(8, int(os.environ.get("HARD_BUSY_BOX_CAP", "16")))
+        busy_box_cap = max(12, int(os.environ.get("HARD_BUSY_BOX_CAP", "28")))
     except ValueError:
-        busy_box_cap = 16
+        busy_box_cap = 28
     primary_cap = min(max_instances, busy_box_cap)
 
     t_hard = time.time()
@@ -806,6 +839,14 @@ def discover_hard_motifs(
         model=model,
         max_instances=primary_cap,
     )
+    # Sparse / failed VLM → SLIC seeds (better than 1 giant residual blob)
+    if len(boxes) < 6:
+        from discover import _dedupe as _dedupe_boxes
+
+        print(f"  hard path: only {len(boxes)} VLM boxes — merging SLIC fallback")
+        slic = _slic_fallback_boxes(image, print_type, primary_cap)
+        boxes = _dedupe_boxes(boxes + slic, iou_thresh=0.4)[:primary_cap]
+        meta["method"] = "vlm_slic_sam_hybrid"
     if not boxes:
         print("  hard path: no VLM boxes — SLIC fallback")
         boxes = _slic_fallback_boxes(image, print_type, primary_cap)
