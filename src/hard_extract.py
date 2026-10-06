@@ -1241,7 +1241,8 @@ def _hybrid_residual_fill(
                 if is_residual and (mask_frac > 0.06 or bbox_frac > 0.11 or multi):
                     dropped_giant += 1
                     continue
-                if mask_frac > 0.14 or bbox_frac > 0.20 or (multi and bbox_frac > 0.08):
+                # Swollen primaries (absorb glue) — mustard m013
+                if mask_frac > 0.12 or bbox_frac > 0.16 or (multi and bbox_frac > 0.06):
                     dropped_giant += 1
                     continue
                 pruned.append(inst)
