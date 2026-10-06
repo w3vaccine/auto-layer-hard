@@ -214,6 +214,11 @@ def classify_print_routed(
     base = classify_print(image)
     if not use_vlm or not api_key:
         return base
+    # Skip the VLM round-trip when the heuristic is already decisive (saves ~10–20s).
+    if base.confidence >= 0.7 and base.print_type in ("clean", "busy"):
+        return base
+    if base.confidence >= 0.85:
+        return base
     vlm = classify_print_vlm(image, api_key=api_key, model=model)
     if vlm is None:
         return base

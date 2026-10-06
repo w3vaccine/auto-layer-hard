@@ -36,6 +36,8 @@ Optional smoke (no server):
 
 Docker image: `docker/Dockerfile` (CPU torch + sam2_b). Needs Pro / 4GB. Set `GOOGLE_API_KEY`. Blueprint: `render.yaml`. Health: `GET /health`.
 
+Busy/hard path latency (CPU): defaults target ~1–2 min — one Gemini discover pass, ≤16 SAM boxes at 512px, CV residual fill. Override with `HARD_BUSY_BOX_CAP`, `HARD_BUSY_GEMINI_PASSES`, `HARD_SAM_MAX_SIDE`.
+
 ---
 
 ## What “works how it should” means

@@ -170,7 +170,7 @@ def _run_job(job_id: str, image_path: Path, mode: str) -> None:
 
         if mode in ("cv", "both"):
             with JOBS_LOCK:
-                JOBS[job_id]["step"] = "Auto route (clean=CV, hard=VLM→SAM)…"
+                JOBS[job_id]["step"] = "Routing + extract (busy/hard ≈1–2 min on CPU)…"
             cv_dir = job_dir / "cv"
             run(
                 image_path,

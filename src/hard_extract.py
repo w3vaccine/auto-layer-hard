@@ -5,6 +5,8 @@ Used when print_type is soft | camo | busy. Clean prints stay on CV.
 
 from __future__ import annotations
 
+import os
+import time
 from typing import TYPE_CHECKING
 
 import cv2
@@ -104,12 +106,25 @@ def _discover_boxes_typed(
     boxes = _dedupe(boxes, iou_thresh=0.4)
     print(f"  hard discover pass1 ({print_type}): {len(boxes)}")
 
-    max_passes = 4 if print_type == "camo" else (3 if print_type == "soft" else 4)
+    # Latency budget: busy prints used to spend ~2 min on 4 Gemini passes alone.
+    # Cap passes hard; CV residual fill recovers coverage for missed motifs.
+    if print_type == "busy":
+        try:
+            max_passes = max(1, int(os.environ.get("HARD_BUSY_GEMINI_PASSES", "1")))
+        except ValueError:
+            max_passes = 1
+        early_stop = 16
+    elif print_type == "camo":
+        max_passes = 3
+        early_stop = max_instances
+    else:
+        max_passes = 2
+        early_stop = max_instances
     for pass_index in range(2, max_passes + 1):
-        if len(boxes) >= max_instances:
+        if len(boxes) >= max_instances or len(boxes) >= early_stop:
             break
-        # Busy: stop early once we have a decent whole-motif set (avoid over-asking)
-        if print_type == "busy" and len(boxes) >= 40:
+        # Busy: optional 2nd pass only when pass1 was sparse
+        if print_type == "busy" and len(boxes) >= 10:
             break
         overlay = ov(rgb, boxes)
         payload = _call_gemini(client, model, PASS_N_PROMPT, [rgb, overlay])
@@ -254,29 +269,109 @@ def soft_alpha_from_sam(
     return alpha_u8
 
 
+def _sam_max_side() -> int:
+    """CPU SAM at full res is ~10s+/box; 512 keeps quality usable and is ~4× faster."""
+    try:
+        return max(256, int(os.environ.get("HARD_SAM_MAX_SIDE", "512")))
+    except ValueError:
+        return 512
+
+
+def _prepare_sam_rgb(rgb: np.ndarray, max_side: int | None = None) -> tuple[np.ndarray, float, int, int]:
+    """Downscale for SAM inference. Returns (rgb_small, scale, full_h, full_w)."""
+    h, w = rgb.shape[:2]
+    side = _sam_max_side() if max_side is None else max_side
+    m = max(h, w)
+    if m <= side:
+        return rgb, 1.0, h, w
+    scale = side / float(m)
+    small = cv2.resize(
+        rgb,
+        (max(1, int(round(w * scale))), max(1, int(round(h * scale)))),
+        interpolation=cv2.INTER_AREA,
+    )
+    return small, scale, h, w
+
+
 def sam_mask_from_box(
     rgb: np.ndarray,
     bbox_norm: list[float],
     sam_model,
 ) -> np.ndarray | None:
-    h, w = rgb.shape[:2]
-    box = _bbox_xyxy(bbox_norm, w, h, pad=0.03)
-    cx = int((box[0] + box[2]) / 2)
-    cy = int((box[1] + box[3]) / 2)
-    try:
-        results = sam_model.predict(
-            rgb,
-            bboxes=[box],
-            points=[[cx, cy]],
-            labels=[1],
-            verbose=False,
-        )
-        if not results:
+    masks = sam_masks_from_boxes(rgb, [bbox_norm], sam_model)
+    return masks[0] if masks else None
+
+
+def sam_masks_from_boxes(
+    rgb: np.ndarray,
+    bbox_norms: list[list[float]],
+    sam_model,
+    *,
+    batch_size: int = 16,
+) -> list[np.ndarray | None]:
+    """Batched SAM2 prompts on a downscaled image; upsample masks to full res."""
+    if not bbox_norms:
+        return []
+    small, scale, h, w = _prepare_sam_rgb(rgb)
+    sh, sw = small.shape[:2]
+    out: list[np.ndarray | None] = [None] * len(bbox_norms)
+
+    def _one(idx: int, bbox_norm: list[float]) -> np.ndarray | None:
+        box = _bbox_xyxy(bbox_norm, sw, sh, pad=0.03)
+        cx = int((box[0] + box[2]) / 2)
+        cy = int((box[1] + box[3]) / 2)
+        try:
+            results = sam_model.predict(
+                small,
+                bboxes=[box],
+                points=[[cx, cy]],
+                labels=[1],
+                verbose=False,
+            )
+            if not results:
+                return None
+            return _mask_from_sam_result(results[0], h, w)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  SAM box predict failed: {exc}")
             return None
-        return _mask_from_sam_result(results[0], h, w)
-    except Exception as exc:  # noqa: BLE001
-        print(f"  SAM box predict failed: {exc}")
-        return None
+
+    # Prefer multi-box predict (one encoder pass); fall back to sequential.
+    for start in range(0, len(bbox_norms), max(1, batch_size)):
+        chunk = bbox_norms[start : start + batch_size]
+        boxes = [_bbox_xyxy(b, sw, sh, pad=0.03) for b in chunk]
+        points = [[int((b[0] + b[2]) / 2), int((b[1] + b[3]) / 2)] for b in boxes]
+        labels = [1] * len(boxes)
+        batched_ok = False
+        try:
+            results = sam_model.predict(
+                small,
+                bboxes=boxes,
+                points=points,
+                labels=labels,
+                verbose=False,
+            )
+            if results and getattr(results[0], "masks", None) is not None:
+                data = results[0].masks.data
+                arr = data.cpu().numpy() if hasattr(data, "cpu") else np.asarray(data)
+                if arr.ndim == 3 and arr.shape[0] == len(chunk):
+                    for i, m in enumerate(arr):
+                        mm = (m > 0.5).astype(np.uint8) * 255
+                        if mm.shape[:2] != (h, w):
+                            mm = cv2.resize(mm, (w, h), interpolation=cv2.INTER_NEAREST)
+                        out[start + i] = mm
+                    batched_ok = True
+                elif arr.ndim == 3 and arr.shape[0] == 1 and len(chunk) == 1:
+                    mm = (arr[0] > 0.5).astype(np.uint8) * 255
+                    if mm.shape[:2] != (h, w):
+                        mm = cv2.resize(mm, (w, h), interpolation=cv2.INTER_NEAREST)
+                    out[start] = mm
+                    batched_ok = True
+        except Exception:  # noqa: BLE001
+            batched_ok = False
+        if not batched_ok:
+            for i, bn in enumerate(chunk):
+                out[start + i] = _one(start + i, bn)
+    return out
 
 
 def _color_matte_in_box(rgb: np.ndarray, bbox_norm: list[float], *, soft: bool) -> np.ndarray:
@@ -333,17 +428,19 @@ def boxes_to_instances_sam(
     sam = _get_sam(sam_model_name) if sam_available() else None
     if sam is None:
         print("  SAM unavailable — using color matte fallback inside boxes")
+        sam_masks: list[np.ndarray | None] = [None] * len(boxes)
+    else:
+        t0 = time.time()
+        print(f"  SAM2 {len(boxes)} boxes @max{_sam_max_side()} (batched)…")
+        sam_masks = sam_masks_from_boxes(rgb, [b.bbox_norm for b in boxes], sam)
+        print(f"  SAM2 done in {time.time() - t0:.1f}s")
 
     instances: list[MotifInstance] = []
-    for b in boxes:
+    for b, m in zip(boxes, sam_masks):
         box = _bbox_xyxy(b.bbox_norm, w, h, pad=0.03)
-        if sam is not None:
-            m = sam_mask_from_box(rgb, b.bbox_norm, sam)
-            if m is None or m.sum() < 30:
-                alpha = _color_matte_in_box(rgb, b.bbox_norm, soft=(mode == "soft"))
-            else:
-                # IMPORTANT: no CV-ink intersection for camo/soft
-                alpha = soft_alpha_from_sam(rgb, m, box, mode=mode)
+        if m is not None and int(m.sum()) >= 30:
+            # IMPORTANT: no CV-ink intersection for camo/soft
+            alpha = soft_alpha_from_sam(rgb, m, box, mode=mode)
         else:
             alpha = _color_matte_in_box(rgb, b.bbox_norm, soft=(mode == "soft"))
 
@@ -533,9 +630,10 @@ def _hybrid_residual_fill(
     before = len(instances)
 
     if print_type == "camo":
-        # Extra contrast seeds on uncovered areas → SAM
+        # Extra contrast seeds on uncovered areas → SAM (capped for CPU latency)
         union = _union_alpha(instances, h, w)
-        extra_boxes = _camo_contrast_boxes(rgb, union, max_new=min(60, max_instances - before))
+        camo_sam_cap = min(24, max(0, max_instances - before))
+        extra_boxes = _camo_contrast_boxes(rgb, union, max_new=camo_sam_cap)
         meta["camo_extra_boxes"] = len(extra_boxes)
         if extra_boxes:
             print(f"  camo residual seeds: {len(extra_boxes)}")
@@ -558,24 +656,7 @@ def _hybrid_residual_fill(
                 else:
                     ex.confidence = min(ex.confidence, 0.5)
                     instances.append(ex)
-        # Second contrast pass (lighter)
-        union = _union_alpha(instances, h, w)
-        extra2 = _camo_contrast_boxes(rgb, union, max_new=30)
-        if extra2:
-            extra_i = boxes_to_instances_sam(
-                image, extra2, print_type="camo", sam_model_name=sam_model_name
-            )
-            for ex in extra_i:
-                ea = ex.mask > 40
-                absorbed = False
-                for inst in instances:
-                    if int((ea & (inst.mask > 40)).sum()) > 0.3 * max(1, int(ea.sum())):
-                        inst.mask = np.maximum(inst.mask, ex.mask)
-                        absorbed = True
-                        break
-                if not absorbed and len(instances) < max_instances:
-                    ex.confidence = 0.45
-                    instances.append(ex)
+        # Second contrast pass stays CV-only (no more SAM) to keep camo under SLA
         meta["after_camo_fill"] = len(instances)
     else:
         # busy / soft: CV ink residual absorb + limited new uncertain pieces
@@ -710,8 +791,14 @@ def discover_hard_motifs(
         return instances, meta
 
     # Busy: VLM+SAM primary motifs + CV residual fill
-    primary_cap = min(max_instances, 90)
+    # Cap SAM prompts — each full-res CPU predict was ~10–13s; residual CV covers the rest.
+    try:
+        busy_box_cap = max(8, int(os.environ.get("HARD_BUSY_BOX_CAP", "16")))
+    except ValueError:
+        busy_box_cap = 16
+    primary_cap = min(max_instances, busy_box_cap)
 
+    t_hard = time.time()
     boxes = _discover_boxes_typed(
         image,
         print_type,
@@ -724,10 +811,18 @@ def discover_hard_motifs(
         boxes = _slic_fallback_boxes(image, print_type, primary_cap)
         meta["method"] = "slic_sam_hybrid"
 
+    # Prefer larger motifs when over cap
+    boxes = sorted(boxes, key=lambda b: -b.area())[:primary_cap]
+    for i, b in enumerate(boxes, start=1):
+        b.id = f"m{i:03d}"
+
     meta["boxes"] = len(boxes)
+    print(f"  hard discover done in {time.time() - t_hard:.1f}s → {len(boxes)} boxes")
+    t_sam = time.time()
     instances = boxes_to_instances_sam(
         image, boxes, print_type=print_type, sam_model_name=sam_model
     )
+    meta["sam_seconds"] = round(time.time() - t_sam, 2)
     for inst in instances:
         inst.confidence = max(float(inst.confidence), 0.62)
 
@@ -745,9 +840,13 @@ def discover_hard_motifs(
         sam_model_name=sam_model,
     )
     meta["fill"] = fill_meta
+    meta["hard_seconds"] = round(time.time() - t_hard, 2)
 
     for i, inst in enumerate(instances, start=1):
         inst.id = f"m{i:03d}"
     meta["instances"] = len(instances)
-    print(f"  hard path ({print_type}): {len(boxes)} boxes → {len(instances)} instances (hybrid)")
+    print(
+        f"  hard path ({print_type}): {len(boxes)} boxes → {len(instances)} instances "
+        f"(hybrid, {meta['hard_seconds']}s)"
+    )
     return instances, meta
