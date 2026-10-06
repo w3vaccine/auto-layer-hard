@@ -64,9 +64,12 @@ def qa_job(job_id: str, out: Path) -> dict:
             flags.append("border_bleed")
         if opaque < 0.03 and area_frac < 0.015:
             flags.append("tiny")
-        # Large bbox with low fill often means multi-motif or incomplete isolation
-        if area_frac > 0.20 and opaque < 0.40 and n >= 3:
+        # Large bbox with low/medium fill = multi-motif glue (mustard m013)
+        if area_frac > 0.17 and (opaque < 0.50 or n >= 3):
             flags.append("sparse_giant")
+        serious_flags = {"huge_area", "sparse_giant", "border_bleed", "multi_motif"}
+        if any(f in serious_flags for f in flags) and "multi_motif" in flags and area_frac < 0.03:
+            flags = [f for f in flags if f != "multi_motif"]
         rows.append(
             {
                 **L,
