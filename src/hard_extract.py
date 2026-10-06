@@ -645,7 +645,13 @@ def boxes_to_instances_graphic(
                     gem_alphas[i] = alpha
                     print(f"    gemini ok {boxes[i].id} ({boxes[i].label})")
 
-    # Seed centers for cross-talk rejection
+    # Always compute watershed basins — used to strip neighbors from Gemini,
+    # and as fallback when Gemini is rejected/missing.
+    print(f"  watershed basins for {len(boxes)} seeds…")
+    ws_all = _watershed_instances_for_indices(
+        rgb, boxes, bg, dist_bg, list(range(len(boxes)))
+    )
+
     centers: list[tuple[int, int]] = []
     for b in boxes:
         x, y, bw, bh = b.bbox_norm
@@ -653,10 +659,9 @@ def boxes_to_instances_graphic(
         centers.append((int(np.clip(cx, 0, w - 1)), int(np.clip(cy, 0, h - 1))))
 
     # White-bg Gemini is the quality path — trust it when it looks like one motif.
-    # Watershed only for misses / rejected Gemini (clipping was punching good cutouts).
-    need_ws = [i for i in range(len(boxes)) if i not in gem_alphas]
     accepted_gem: dict[int, np.ndarray] = {}
-    for i, g in gem_alphas.items():
+    need_ws: list[int] = []
+    for i, g in list(gem_alphas.items()):
         frac = float((g > 20).sum()) / img_px
         foreign = sum(
             1
@@ -670,7 +675,16 @@ def boxes_to_instances_graphic(
             )
             need_ws.append(i)
             continue
-        # Keep largest connected component under the crop (kill speckles)
+        g = g.copy()
+        # Strip pixels owned by OTHER basins (don't require own-basin intersection —
+        # that punched holes in good white-bg cutouts).
+        for j, ws_inst in ws_all.items():
+            if j == i:
+                continue
+            other = ws_inst.mask > 80
+            if other.any():
+                g[other] = 0
+        # Keep largest CC under seed
         solid = (g > 40).astype(np.uint8)
         n_cc, lab = cv2.connectedComponents(solid, 8)
         if n_cc > 2:
@@ -682,16 +696,17 @@ def boxes_to_instances_graphic(
                 lid = areas[0][1] if areas else 0
             if lid > 0:
                 keep = lab == lid
-                g = g.copy()
                 g[~keep] = 0
+        if int((g > 20).sum()) < 40:
+            need_ws.append(i)
+            continue
         accepted_gem[i] = g
 
-    ws_instances: dict[int, MotifInstance] = {}
-    if need_ws:
-        print(f"  watershed fallback for {len(need_ws)} seeds…")
-        ws_instances = _watershed_instances_for_indices(
-            rgb, boxes, bg, dist_bg, sorted(set(need_ws))
-        )
+    for i in range(len(boxes)):
+        if i not in accepted_gem and i not in need_ws:
+            need_ws.append(i)
+
+    ws_instances = {i: ws_all[i] for i in need_ws if i in ws_all}
 
     # Soft competition among Gemini alphas: higher alpha wins overlapping pixels
     if len(accepted_gem) >= 2:
@@ -1300,9 +1315,9 @@ def discover_hard_motifs(
     # Busy: VLM+SAM primary motifs + CV residual fill
     # More SAM seeds = separable overlapping leaves; 512px batch keeps CPU under ~90s.
     try:
-        busy_box_cap = max(12, int(os.environ.get("HARD_BUSY_BOX_CAP", "28")))
+        busy_box_cap = max(12, int(os.environ.get("HARD_BUSY_BOX_CAP", "16")))
     except ValueError:
-        busy_box_cap = 28
+        busy_box_cap = 16
     primary_cap = min(max_instances, busy_box_cap)
 
     t_hard = time.time()
@@ -1313,13 +1328,16 @@ def discover_hard_motifs(
         model=model,
         max_instances=primary_cap,
     )
-    # Sparse VLM → SLIC seeds (tropical needs ≥12 seeds; 8 left too much for residual)
-    if print_type == "busy" and len(boxes) < 12:
+    # Sparse VLM → add SLIC only up to a modest seed budget (not fill to 28)
+    seed_target = min(primary_cap, 14)
+    if print_type == "busy" and len(boxes) < seed_target:
         from discover import _dedupe as _dedupe_boxes
 
-        print(f"  hard path: only {len(boxes)} VLM boxes — merging SLIC fallback")
-        slic = _slic_fallback_boxes(image, print_type, primary_cap)
-        boxes = _dedupe_boxes(boxes + slic, iou_thresh=0.4)[:primary_cap]
+        print(
+            f"  hard path: {len(boxes)} VLM boxes < {seed_target} — SLIC top-up"
+        )
+        slic = _slic_fallback_boxes(image, print_type, seed_target)
+        boxes = _dedupe_boxes(boxes + slic, iou_thresh=0.4)[:seed_target]
         meta["slic_merged"] = True
     elif len(boxes) < 6:
         from discover import _dedupe as _dedupe_boxes
@@ -1359,14 +1377,34 @@ def discover_hard_motifs(
     meta["merged_from"] = before
     meta["merged_to"] = len(instances)
 
-    # Hybrid residual fill — the coverage win
-    instances, fill_meta = _hybrid_residual_fill(
-        image,
-        instances,
-        print_type,
-        max_instances=max_instances,
-        sam_model_name=sam_model,
-    )
+    # Skip residual if primary already covers enough (avoids shard explosion)
+    from segment import estimate_background_color, ink_distance
+
+    rgb_chk = np.array(image.convert("RGB"))
+    h_chk, w_chk = rgb_chk.shape[:2]
+    bg_chk = estimate_background_color(rgb_chk)
+    dist_chk, _ = ink_distance(rgb_chk, bg_chk)
+    ink = dist_chk > 11.0
+    union = np.zeros((h_chk, w_chk), dtype=bool)
+    for inst in instances:
+        union |= inst.mask > 40
+    primary_cov = float((union & ink).sum()) / max(1, int(ink.sum()))
+    meta["primary_coverage"] = round(primary_cov, 4)
+    if print_type == "busy" and primary_cov >= 0.92:
+        print(f"  skip residual fill — primary coverage {primary_cov:.3f}")
+        fill_meta = {
+            "residual_fill": "skipped",
+            "primary_coverage": primary_cov,
+            "added": 0,
+        }
+    else:
+        instances, fill_meta = _hybrid_residual_fill(
+            image,
+            instances,
+            print_type,
+            max_instances=max_instances,
+            sam_model_name=sam_model,
+        )
     meta["fill"] = fill_meta
     meta["hard_seconds"] = round(time.time() - t_hard, 2)
 
