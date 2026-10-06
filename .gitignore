@@ -1,0 +1,9 @@
+.venv/
+out/
+__pycache__/
+*.pyc
+.env
+.DS_Store
+*.pt
+sam2_*.pt
+weights/

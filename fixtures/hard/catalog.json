@@ -1,0 +1,182 @@
+[
+  {
+    "id": "hard/h01_overlap_flowers.png",
+    "label": "Overlap flowers",
+    "hint": "heavy overlaps",
+    "file": "h01_overlap_flowers.png"
+  },
+  {
+    "id": "hard/h02_low_contrast.png",
+    "label": "Low contrast",
+    "hint": "motifs \u2248 background",
+    "file": "h02_low_contrast.png"
+  },
+  {
+    "id": "hard/h03_micro_ditsy.png",
+    "label": "Micro ditsy",
+    "hint": "200+ tiny motifs",
+    "file": "h03_micro_ditsy.png"
+  },
+  {
+    "id": "hard/h04_touching_grid.png",
+    "label": "Touching grid",
+    "hint": "kissing edges",
+    "file": "h04_touching_grid.png"
+  },
+  {
+    "id": "hard/h05_nested_rings.png",
+    "label": "Nested rings",
+    "hint": "holes / donuts",
+    "file": "h05_nested_rings.png"
+  },
+  {
+    "id": "hard/h06_thin_lines.png",
+    "label": "Thin line motifs",
+    "hint": "hairline strokes",
+    "file": "h06_thin_lines.png"
+  },
+  {
+    "id": "hard/h07_noisy_ground.png",
+    "label": "Noisy ground",
+    "hint": "busy textured bg",
+    "file": "h07_noisy_ground.png"
+  },
+  {
+    "id": "hard/h08_gradient_ground.png",
+    "label": "Gradient ground",
+    "hint": "non-flat bg",
+    "file": "h08_gradient_ground.png"
+  },
+  {
+    "id": "hard/h09_same_hue_family.png",
+    "label": "Same-hue family",
+    "hint": "all pink tones",
+    "file": "h09_same_hue_family.png"
+  },
+  {
+    "id": "hard/h10_mixed_scale.png",
+    "label": "Mixed scale",
+    "hint": "tiny + huge",
+    "file": "h10_mixed_scale.png"
+  },
+  {
+    "id": "hard/h11_edge_cropped.png",
+    "label": "Edge cropped",
+    "hint": "motifs cut by frame",
+    "file": "h11_edge_cropped.png"
+  },
+  {
+    "id": "hard/h12_soft_watercolor.png",
+    "label": "Soft watercolor",
+    "hint": "blurred edges",
+    "file": "h12_soft_watercolor.png"
+  },
+  {
+    "id": "hard/h13_checker_plus.png",
+    "label": "Checker + motifs",
+    "hint": "patterned ground",
+    "file": "h13_checker_plus.png"
+  },
+  {
+    "id": "hard/h14_one_giant.png",
+    "label": "One giant motif",
+    "hint": "dominant object",
+    "file": "h14_one_giant.png"
+  },
+  {
+    "id": "hard/h15_fillers_between.png",
+    "label": "Fillers between",
+    "hint": "large + micro fillers",
+    "file": "h15_fillers_between.png"
+  },
+  {
+    "id": "hard/h16_stripes_break.png",
+    "label": "Broken stripes",
+    "hint": "elongated motifs",
+    "file": "h16_stripes_break.png"
+  },
+  {
+    "id": "hard/h17_camouflage.png",
+    "label": "Camouflage blobs",
+    "hint": "similar multi-tone",
+    "file": "h17_camouflage.png"
+  },
+  {
+    "id": "hard/h18_outline_only.png",
+    "label": "Outline only",
+    "hint": "no fill shapes",
+    "file": "h18_outline_only.png"
+  },
+  {
+    "id": "hard/h19_stacked_same.png",
+    "label": "Stacked identical",
+    "hint": "exact repeats overlap",
+    "file": "h19_stacked_same.png"
+  },
+  {
+    "id": "hard/h20_confetti.png",
+    "label": "Confetti scatter",
+    "hint": "many shapes/types",
+    "file": "h20_confetti.png"
+  },
+  {
+    "id": "hard/h21_paisley_like.png",
+    "label": "Paisley-like",
+    "hint": "complex teardrops",
+    "file": "h21_paisley_like.png"
+  },
+  {
+    "id": "hard/h22_near_white_on_white.png",
+    "label": "Near-white on white",
+    "hint": "barely visible",
+    "file": "h22_near_white_on_white.png"
+  },
+  {
+    "id": "hard/h23_black_on_black.png",
+    "label": "Black on charcoal",
+    "hint": "dark-on-dark",
+    "file": "h23_black_on_black.png"
+  },
+  {
+    "id": "hard/h24_connected_chain.png",
+    "label": "Connected chain",
+    "hint": "merged CC risk",
+    "file": "h24_connected_chain.png"
+  },
+  {
+    "id": "hard/h25_halos.png",
+    "label": "Glow halos",
+    "hint": "soft fringe",
+    "file": "h25_halos.png"
+  },
+  {
+    "id": "hard/h26_dense_leaves.png",
+    "label": "Dense leaves",
+    "hint": "similar shapes packed",
+    "file": "h26_dense_leaves.png"
+  },
+  {
+    "id": "hard/h27_two_tone_split.png",
+    "label": "Two-tone split",
+    "hint": "bg changes mid-image",
+    "file": "h27_two_tone_split.png"
+  },
+  {
+    "id": "hard/h28_spiral_scatter.png",
+    "label": "Spiral scatter",
+    "hint": "structured density",
+    "file": "h28_spiral_scatter.png"
+  },
+  {
+    "id": "hard/h29_ink_blots.png",
+    "label": "Ink blots",
+    "hint": "irregular organic",
+    "file": "h29_ink_blots.png"
+  },
+  {
+    "id": "hard/h30_chaos_mix.png",
+    "label": "Chaos mix",
+    "hint": "kitchen-sink hard mode",
+    "file": "h30_chaos_mix.png"
+  }
+]

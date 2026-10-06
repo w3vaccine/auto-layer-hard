@@ -1,0 +1,14 @@
+{
+  "built_from": "/Users/zharaskairat/Desktop/MaketheDot/auto-layer-poc/out/smoke_handoff/good",
+  "document_id": "handoff_sample",
+  "layers_accepted": 12,
+  "files": [
+    "CONTRACT.md",
+    "KNOWN_LIMITS.md",
+    "README.md",
+    "sample_layers_menu.json",
+    "sample_motif_pack.zip",
+    "sample_motifs.json",
+    "sample_scene.json"
+  ]
+}

@@ -1,0 +1,302 @@
+{
+  "version": 1,
+  "kind": "motif_pack",
+  "document_id": "handoff_sample",
+  "source": "06-seashells.png",
+  "canvas": {
+    "width": 1024,
+    "height": 1024
+  },
+  "base": "base.png",
+  "background": "background.png",
+  "original": "original.png",
+  "residual": {
+    "id": "residual_sheet",
+    "kind": "residual_sheet",
+    "label": "Unextracted ink (kept in base)",
+    "src": "assets/residual_ink.png",
+    "locked": true,
+    "status": "kept_in_base",
+    "residual_frac": 0.001567840576171875,
+    "empty": false
+  },
+  "motifs": [
+    {
+      "id": "m008",
+      "label": "motif",
+      "asset": "motifs/m008.png",
+      "bbox_px": [
+        70,
+        97,
+        110,
+        105
+      ],
+      "transform": {
+        "x": 70,
+        "y": 97,
+        "width": 110,
+        "height": 105,
+        "rotation": 0.0
+      },
+      "confidence": 0.851069493741827,
+      "confidence_tier": "high",
+      "matte_score": 0.6759307359307359,
+      "hue": 0,
+      "saturation": 100
+    },
+    {
+      "id": "m012",
+      "label": "motif",
+      "asset": "motifs/m012.png",
+      "bbox_px": [
+        381,
+        218,
+        108,
+        104
+      ],
+      "transform": {
+        "x": 381,
+        "y": 218,
+        "width": 108,
+        "height": 104,
+        "rotation": 0.0
+      },
+      "confidence": 0.8467403846153847,
+      "confidence_tier": "high",
+      "matte_score": 0.6679131054131054,
+      "hue": 0,
+      "saturation": 100
+    },
+    {
+      "id": "m010",
+      "label": "motif",
+      "asset": "motifs/m010.png",
+      "bbox_px": [
+        901,
+        218,
+        109,
+        104
+      ],
+      "transform": {
+        "x": 901,
+        "y": 218,
+        "width": 109,
+        "height": 104,
+        "rotation": 0.0
+      },
+      "confidence": 0.8452666666666667,
+      "confidence_tier": "high",
+      "matte_score": 0.665666901905434,
+      "hue": 0,
+      "saturation": 100
+    },
+    {
+      "id": "m021",
+      "label": "motif",
+      "asset": "motifs/m021.png",
+      "bbox_px": [
+        36,
+        226,
+        102,
+        111
+      ],
+      "transform": {
+        "x": 36,
+        "y": 226,
+        "width": 102,
+        "height": 111,
+        "rotation": 0.0
+      },
+      "confidence": 0.8050400534045394,
+      "confidence_tier": "high",
+      "matte_score": 0.5978625684508038,
+      "hue": 0,
+      "saturation": 100
+    },
+    {
+      "id": "m019",
+      "label": "motif",
+      "asset": "motifs/m019.png",
+      "bbox_px": [
+        548,
+        228,
+        101,
+        110
+      ],
+      "transform": {
+        "x": 548,
+        "y": 228,
+        "width": 101,
+        "height": 110,
+        "rotation": 0.0
+      },
+      "confidence": 0.8141169033262012,
+      "confidence_tier": "high",
+      "matte_score": 0.6126912691269127,
+      "hue": 0,
+      "saturation": 100
+    },
+    {
+      "id": "m005",
+      "label": "motif",
+      "asset": "motifs/m005.png",
+      "bbox_px": [
+        203,
+        480,
+        107,
+        110
+      ],
+      "transform": {
+        "x": 203,
+        "y": 480,
+        "width": 107,
+        "height": 110,
+        "rotation": 0.0
+      },
+      "confidence": 0.855472614031874,
+      "confidence_tier": "high",
+      "matte_score": 0.6837723024638912,
+      "hue": 0,
+      "saturation": 100
+    },
+    {
+      "id": "m006",
+      "label": "motif",
+      "asset": "motifs/m006.png",
+      "bbox_px": [
+        722,
+        484,
+        108,
+        110
+      ],
+      "transform": {
+        "x": 722,
+        "y": 484,
+        "width": 108,
+        "height": 110,
+        "rotation": 0.0
+      },
+      "confidence": 0.845986030478955,
+      "confidence_tier": "high",
+      "matte_score": 0.6680976430976431,
+      "hue": 0,
+      "saturation": 100
+    },
+    {
+      "id": "m009",
+      "label": "motif",
+      "asset": "motifs/m009.png",
+      "bbox_px": [
+        72,
+        631,
+        107,
+        107
+      ],
+      "transform": {
+        "x": 72,
+        "y": 631,
+        "width": 107,
+        "height": 107,
+        "rotation": 0.0
+      },
+      "confidence": 0.8547365444433972,
+      "confidence_tier": "high",
+      "matte_score": 0.6818936151628964,
+      "hue": 0,
+      "saturation": 100
+    },
+    {
+      "id": "m007",
+      "label": "motif",
+      "asset": "motifs/m007.png",
+      "bbox_px": [
+        581,
+        633,
+        109,
+        106
+      ],
+      "transform": {
+        "x": 581,
+        "y": 633,
+        "width": 109,
+        "height": 106,
+        "rotation": 0.0
+      },
+      "confidence": 0.8535387488328665,
+      "confidence_tier": "high",
+      "matte_score": 0.6801107841440194,
+      "hue": 0,
+      "saturation": 100
+    },
+    {
+      "id": "m011",
+      "label": "motif",
+      "asset": "motifs/m011.png",
+      "bbox_px": [
+        381,
+        754,
+        107,
+        104
+      ],
+      "transform": {
+        "x": 381,
+        "y": 754,
+        "width": 107,
+        "height": 104,
+        "rotation": 0.0
+      },
+      "confidence": 0.8507524271844661,
+      "confidence_tier": "high",
+      "matte_score": 0.6744248741912293,
+      "hue": 0,
+      "saturation": 100
+    },
+    {
+      "id": "m013",
+      "label": "motif",
+      "asset": "motifs/m013.png",
+      "bbox_px": [
+        900,
+        754,
+        107,
+        105
+      ],
+      "transform": {
+        "x": 900,
+        "y": 754,
+        "width": 107,
+        "height": 105,
+        "rotation": 0.0
+      },
+      "confidence": 0.8450927617033548,
+      "confidence_tier": "high",
+      "matte_score": 0.664886515353805,
+      "hue": 0,
+      "saturation": 100
+    },
+    {
+      "id": "m022",
+      "label": "motif",
+      "asset": "motifs/m022.png",
+      "bbox_px": [
+        547,
+        771,
+        99,
+        102
+      ],
+      "transform": {
+        "x": 547,
+        "y": 771,
+        "width": 99,
+        "height": 102,
+        "rotation": 0.0
+      },
+      "confidence": 0.8446885069817401,
+      "confidence_tier": "high",
+      "matte_score": 0.6616161616161617,
+      "hue": 0,
+      "saturation": 100
+    }
+  ],
+  "note": "Layers Menu / Pattern Placement handoff pack"
+}

@@ -1,0 +1,122 @@
+[
+  {
+    "id": "showcase/s01_garden_roses.png",
+    "label": "Garden roses",
+    "hint": "large florals",
+    "file": "s01_garden_roses.png",
+    "source": "gemini",
+    "size": 2048
+  },
+  {
+    "id": "showcase/s02_butterflies.png",
+    "label": "Butterflies",
+    "hint": "insects",
+    "file": "s02_butterflies.png",
+    "source": "gemini",
+    "size": 2048
+  },
+  {
+    "id": "showcase/s03_geo_diamonds.png",
+    "label": "Geo diamonds",
+    "hint": "geometric",
+    "file": "s03_geo_diamonds.png",
+    "source": "gemini",
+    "size": 2048
+  },
+  {
+    "id": "showcase/s04_coastal_shells.png",
+    "label": "Coastal shells",
+    "hint": "marine",
+    "file": "s04_coastal_shells.png",
+    "source": "gemini",
+    "size": 2048
+  },
+  {
+    "id": "showcase/s05_berry_sprigs.png",
+    "label": "Berry sprigs",
+    "hint": "fruit",
+    "file": "s05_berry_sprigs.png",
+    "source": "gemini",
+    "size": 2048
+  },
+  {
+    "id": "showcase/s06_art_deco_fans.png",
+    "label": "Art deco fans",
+    "hint": "deco",
+    "file": "s06_art_deco_fans.png",
+    "source": "gemini",
+    "size": 2048
+  },
+  {
+    "id": "showcase/s07_wave_dots.png",
+    "label": "Wave dots",
+    "hint": "polka",
+    "file": "s07_wave_dots.png",
+    "source": "gemini",
+    "size": 2048
+  },
+  {
+    "id": "showcase/s08_ivy_trail.png",
+    "label": "Ivy trail",
+    "hint": "vines",
+    "file": "s08_ivy_trail.png",
+    "source": "gemini",
+    "size": 2048
+  },
+  {
+    "id": "showcase/s09_starfish_marine.png",
+    "label": "Starfish marine",
+    "hint": "sea stars",
+    "file": "s09_starfish_marine.png",
+    "source": "gemini",
+    "size": 2048
+  },
+  {
+    "id": "showcase/s10_folk_birds.png",
+    "label": "Folk birds",
+    "hint": "folk",
+    "file": "s10_folk_birds.png",
+    "source": "gemini",
+    "size": 2048
+  },
+  {
+    "id": "showcase/s11_tulip_grid.png",
+    "label": "Tulip grid",
+    "hint": "ordered florals",
+    "file": "s11_tulip_grid.png",
+    "source": "gemini",
+    "size": 2048
+  },
+  {
+    "id": "showcase/s12_color_blobs.png",
+    "label": "Color blobs",
+    "hint": "abstract",
+    "file": "s12_color_blobs.png",
+    "source": "gemini",
+    "size": 2048
+  },
+  {
+    "id": "showcase/s13_lace_medallions.png",
+    "label": "Lace medallions",
+    "hint": "ornament",
+    "file": "s13_lace_medallions.png",
+    "source": "gemini",
+    "size": 2048
+  },
+  {
+    "id": "showcase/s14_citrus_slices.png",
+    "label": "Citrus slices",
+    "hint": "fruit",
+    "file": "s14_citrus_slices.png",
+    "source": "gemini",
+    "size": 2048
+  },
+  {
+    "id": "showcase/s15_mixed_bouquet.png",
+    "label": "Mixed bouquet",
+    "hint": "mixed floral",
+    "file": "s15_mixed_bouquet.png",
+    "source": "gemini",
+    "size": 2048
+  }
+]

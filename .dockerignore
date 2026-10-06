@@ -1,0 +1,12 @@
+.venv
+out
+__pycache__
+**/__pycache__
+*.pyc
+.env
+*.pt
+.git
+handoff
+scripts
+*.md
+.DS_Store

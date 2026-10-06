@@ -1,0 +1,20 @@
+# Render Blueprint. Set the service Root Directory to this folder
+# (auto-layer-poc) if the git repo is the whole MaketheDot workspace.
+services:
+  - type: web
+    name: auto-layer-hard
+    runtime: docker
+    dockerfilePath: ./docker/Dockerfile
+    plan: pro
+    healthCheckPath: /health
+    envVars:
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: SAM_MODEL
+        value: sam2_b.pt
+      - key: PRELOAD_SAM
+        value: "1"
+      - key: OMP_NUM_THREADS
+        value: "1"

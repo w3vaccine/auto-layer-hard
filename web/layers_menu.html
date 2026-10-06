@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Layers Menu · {{DOC_ID}}</title>
+  <style>
+    :root { --ink:#1a1a1e; --muted:#6e6e76; --line:#e7e7ea; --accent:#2a6f5b; --bg:#f4f3f6; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family:"Segoe UI",system-ui,sans-serif; color:var(--ink); background:var(--bg); }
+    .wrap { max-width:960px; margin:0 auto; padding:28px 20px 48px; }
+    h1 { margin:0 0 4px; font-size:22px; }
+    .meta { color:var(--muted); font-size:13px; margin-bottom:18px; }
+    .row { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:16px; }
+    a.btn, button.btn {
+      display:inline-block; padding:8px 12px; background:var(--accent); color:#fff;
+      text-decoration:none; border-radius:8px; font-size:13px; border:0; cursor:pointer;
+    }
+    button.btn.ghost { background:#fff; color:var(--ink); border:1px solid var(--line); }
+    .stage {
+      background:#fff; border-radius:12px; padding:12px; box-shadow:0 1px 3px rgba(0,0,0,.06);
+      position:relative; overflow:auto; max-height:70vh;
+    }
+    .stage .canvas { position:relative; margin:0 auto; background:#eee; }
+    .stage .canvas img.base { display:block; width:100%; height:auto; }
+    .stage .motif {
+      position:absolute; pointer-events:none;
+    }
+    .grid {
+      display:grid; grid-template-columns:repeat(auto-fill,minmax(110px,1fr)); gap:10px; margin-top:18px;
+    }
+    .card {
+      background:#fff; border:1px solid var(--line); border-radius:10px; padding:8px; font-size:12px;
+    }
+    .card img { width:100%; aspect-ratio:1; object-fit:contain; background:#f6f6f8; border-radius:6px; }
+    .card .name { margin-top:6px; font-weight:600; word-break:break-all; }
+    .err { color:#a33; white-space:pre-wrap; }
+    .banner { background:#f7f3e8; border:1px solid #ead9a8; color:#9a6b00; padding:8px 10px; border-radius:8px; font-size:12px; margin-bottom:12px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Layers Menu</h1>
+    <div class="meta" id="meta">Loading {{DOC_ID}}…</div>
+    <div id="banner" class="banner" hidden></div>
+    <div class="row">
+      <a class="btn" href="/">← Auto Layer</a>
+      <a class="btn ghost" id="reviewLink" href="#" target="_blank" rel="noopener">Open proposal review</a>
+      <a class="btn ghost" id="packLink" href="#">Download motif pack</a>
+      <button type="button" class="btn ghost" id="refresh">Refresh</button>
+    </div>
+    <div class="stage"><div class="canvas" id="canvas"></div></div>
+    <h2 style="font-size:15px;margin:22px 0 8px">Accepted motifs</h2>
+    <div class="grid" id="grid"></div>
+    <pre class="err" id="err"></pre>
+  </div>
+  <script>
+    const DOC_ID = "{{DOC_ID}}";
+    const meta = document.getElementById("meta");
+    const canvas = document.getElementById("canvas");
+    const grid = document.getElementById("grid");
+    const err = document.getElementById("err");
+    const banner = document.getElementById("banner");
+    const reviewLink = document.getElementById("reviewLink");
+    const packLink = document.getElementById("packLink");
+
+    async function load() {
+      err.textContent = "";
+      const res = await fetch(`/api/documents/${DOC_ID}/layers-menu`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || res.statusText);
+      meta.textContent = `${data.name || DOC_ID} · ${data.count} accepted · ${data.canvas?.width || "?"}×${data.canvas?.height || "?"}`;
+      packLink.href = `/api/documents/${DOC_ID}/motif-pack`;
+      const prop = data.active_proposal || {};
+      reviewLink.href = prop.document_editor || prop.editor || "#";
+      reviewLink.style.opacity = reviewLink.href === "#" ? "0.4" : "1";
+
+      const residualFrac = data.residual?.residual_frac;
+      if (residualFrac > 0.02) {
+        banner.hidden = false;
+        banner.textContent = `Partial: ${(residualFrac * 100).toFixed(1)}% ink kept in base (residual sheet).`;
+      } else {
+        banner.hidden = true;
+      }
+
+      canvas.innerHTML = "";
+      const w = data.canvas?.width || 1024;
+      const h = data.canvas?.height || 1024;
+      canvas.style.width = Math.min(720, w) + "px";
+      const scale = Math.min(720, w) / w;
+      canvas.style.height = (h * scale) + "px";
+
+      if (data.base) {
+        const base = document.createElement("img");
+        base.className = "base";
+        base.src = data.base;
+        base.alt = "base";
+        canvas.appendChild(base);
+      }
+      for (const L of data.layers || []) {
+        const t = L.transform || {};
+        const img = document.createElement("img");
+        img.className = "motif";
+        img.src = L.url;
+        img.alt = L.id;
+        img.style.left = ((t.x || 0) * scale) + "px";
+        img.style.top = ((t.y || 0) * scale) + "px";
+        img.style.width = ((t.width || 0) * scale) + "px";
+        img.style.height = ((t.height || 0) * scale) + "px";
+        if (t.rotation) img.style.transform = `rotate(${t.rotation}deg)`;
+        canvas.appendChild(img);
+      }
+
+      grid.innerHTML = "";
+      for (const L of data.layers || []) {
+        const card = document.createElement("div");
+        card.className = "card";
+        card.innerHTML = `<img src="${L.url}" alt="${L.id}" /><div class="name">${L.id}</div><div class="meta">${L.label || "motif"}</div>`;
+        const rm = document.createElement("button");
+        rm.type = "button";
+        rm.className = "btn ghost";
+        rm.style.marginTop = "6px";
+        rm.style.width = "100%";
+        rm.textContent = "Remove";
+        rm.onclick = async () => {
+          await fetch(`/api/documents/${DOC_ID}/remove`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ layer_ids: [L.id] }),
+          });
+          load();
+        };
+        card.appendChild(rm);
+        grid.appendChild(card);
+      }
+    }
+
+    document.getElementById("refresh").onclick = () => load().catch((e) => { err.textContent = String(e); });
+    load().catch((e) => { err.textContent = String(e); });
+  </script>
+</body>
+</html>

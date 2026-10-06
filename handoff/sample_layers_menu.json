@@ -1,0 +1,403 @@
+{
+  "kind": "layers_menu",
+  "document_id": "handoff_sample",
+  "name": "handoff-sample-seashells",
+  "canvas": {
+    "width": 1024,
+    "height": 1024
+  },
+  "original": "/documents/handoff_sample/assets/original.png",
+  "base": "/documents/handoff_sample/assets/base.png",
+  "background": "/documents/handoff_sample/assets/background.png",
+  "residual": {
+    "id": "residual_sheet",
+    "kind": "residual_sheet",
+    "label": "Unextracted ink (kept in base)",
+    "src": "assets/residual_ink.png",
+    "locked": true,
+    "status": "kept_in_base",
+    "residual_frac": 0.001567840576171875,
+    "empty": false,
+    "url": "/documents/handoff_sample/assets/residual_ink.png"
+  },
+  "layers": [
+    {
+      "id": "m008",
+      "label": "motif",
+      "asset": "motifs/m008.png",
+      "bbox_px": [
+        70,
+        97,
+        110,
+        105
+      ],
+      "transform": {
+        "x": 70,
+        "y": 97,
+        "width": 110,
+        "height": 105,
+        "rotation": 0.0
+      },
+      "confidence": 0.851069493741827,
+      "confidence_tier": "high",
+      "matte_score": 0.6759307359307359,
+      "hue": 0,
+      "saturation": 100,
+      "status": "accepted",
+      "proposal_id": "good",
+      "accepted_at": "2026-10-01T10:55:56Z",
+      "method": "exact_mask",
+      "url": "/documents/handoff_sample/motifs/m008.png"
+    },
+    {
+      "id": "m012",
+      "label": "motif",
+      "asset": "motifs/m012.png",
+      "bbox_px": [
+        381,
+        218,
+        108,
+        104
+      ],
+      "transform": {
+        "x": 381,
+        "y": 218,
+        "width": 108,
+        "height": 104,
+        "rotation": 0.0
+      },
+      "confidence": 0.8467403846153847,
+      "confidence_tier": "high",
+      "matte_score": 0.6679131054131054,
+      "hue": 0,
+      "saturation": 100,
+      "status": "accepted",
+      "proposal_id": "good",
+      "accepted_at": "2026-10-01T10:55:56Z",
+      "method": "exact_mask",
+      "url": "/documents/handoff_sample/motifs/m012.png"
+    },
+    {
+      "id": "m010",
+      "label": "motif",
+      "asset": "motifs/m010.png",
+      "bbox_px": [
+        901,
+        218,
+        109,
+        104
+      ],
+      "transform": {
+        "x": 901,
+        "y": 218,
+        "width": 109,
+        "height": 104,
+        "rotation": 0.0
+      },
+      "confidence": 0.8452666666666667,
+      "confidence_tier": "high",
+      "matte_score": 0.665666901905434,
+      "hue": 0,
+      "saturation": 100,
+      "status": "accepted",
+      "proposal_id": "good",
+      "accepted_at": "2026-10-01T10:55:56Z",
+      "method": "exact_mask",
+      "url": "/documents/handoff_sample/motifs/m010.png"
+    },
+    {
+      "id": "m021",
+      "label": "motif",
+      "asset": "motifs/m021.png",
+      "bbox_px": [
+        36,
+        226,
+        102,
+        111
+      ],
+      "transform": {
+        "x": 36,
+        "y": 226,
+        "width": 102,
+        "height": 111,
+        "rotation": 0.0
+      },
+      "confidence": 0.8050400534045394,
+      "confidence_tier": "high",
+      "matte_score": 0.5978625684508038,
+      "hue": 0,
+      "saturation": 100,
+      "status": "accepted",
+      "proposal_id": "good",
+      "accepted_at": "2026-10-01T10:55:56Z",
+      "method": "exact_mask",
+      "url": "/documents/handoff_sample/motifs/m021.png"
+    },
+    {
+      "id": "m019",
+      "label": "motif",
+      "asset": "motifs/m019.png",
+      "bbox_px": [
+        548,
+        228,
+        101,
+        110
+      ],
+      "transform": {
+        "x": 548,
+        "y": 228,
+        "width": 101,
+        "height": 110,
+        "rotation": 0.0
+      },
+      "confidence": 0.8141169033262012,
+      "confidence_tier": "high",
+      "matte_score": 0.6126912691269127,
+      "hue": 0,
+      "saturation": 100,
+      "status": "accepted",
+      "proposal_id": "good",
+      "accepted_at": "2026-10-01T10:55:56Z",
+      "method": "exact_mask",
+      "url": "/documents/handoff_sample/motifs/m019.png"
+    },
+    {
+      "id": "m005",
+      "label": "motif",
+      "asset": "motifs/m005.png",
+      "bbox_px": [
+        203,
+        480,
+        107,
+        110
+      ],
+      "transform": {
+        "x": 203,
+        "y": 480,
+        "width": 107,
+        "height": 110,
+        "rotation": 0.0
+      },
+      "confidence": 0.855472614031874,
+      "confidence_tier": "high",
+      "matte_score": 0.6837723024638912,
+      "hue": 0,
+      "saturation": 100,
+      "status": "accepted",
+      "proposal_id": "good",
+      "accepted_at": "2026-10-01T10:55:56Z",
+      "method": "exact_mask",
+      "url": "/documents/handoff_sample/motifs/m005.png"
+    },
+    {
+      "id": "m006",
+      "label": "motif",
+      "asset": "motifs/m006.png",
+      "bbox_px": [
+        722,
+        484,
+        108,
+        110
+      ],
+      "transform": {
+        "x": 722,
+        "y": 484,
+        "width": 108,
+        "height": 110,
+        "rotation": 0.0
+      },
+      "confidence": 0.845986030478955,
+      "confidence_tier": "high",
+      "matte_score": 0.6680976430976431,
+      "hue": 0,
+      "saturation": 100,
+      "status": "accepted",
+      "proposal_id": "good",
+      "accepted_at": "2026-10-01T10:55:56Z",
+      "method": "exact_mask",
+      "url": "/documents/handoff_sample/motifs/m006.png"
+    },
+    {
+      "id": "m009",
+      "label": "motif",
+      "asset": "motifs/m009.png",
+      "bbox_px": [
+        72,
+        631,
+        107,
+        107
+      ],
+      "transform": {
+        "x": 72,
+        "y": 631,
+        "width": 107,
+        "height": 107,
+        "rotation": 0.0
+      },
+      "confidence": 0.8547365444433972,
+      "confidence_tier": "high",
+      "matte_score": 0.6818936151628964,
+      "hue": 0,
+      "saturation": 100,
+      "status": "accepted",
+      "proposal_id": "good",
+      "accepted_at": "2026-10-01T10:55:56Z",
+      "method": "exact_mask",
+      "url": "/documents/handoff_sample/motifs/m009.png"
+    },
+    {
+      "id": "m007",
+      "label": "motif",
+      "asset": "motifs/m007.png",
+      "bbox_px": [
+        581,
+        633,
+        109,
+        106
+      ],
+      "transform": {
+        "x": 581,
+        "y": 633,
+        "width": 109,
+        "height": 106,
+        "rotation": 0.0
+      },
+      "confidence": 0.8535387488328665,
+      "confidence_tier": "high",
+      "matte_score": 0.6801107841440194,
+      "hue": 0,
+      "saturation": 100,
+      "status": "accepted",
+      "proposal_id": "good",
+      "accepted_at": "2026-10-01T10:55:56Z",
+      "method": "exact_mask",
+      "url": "/documents/handoff_sample/motifs/m007.png"
+    },
+    {
+      "id": "m011",
+      "label": "motif",
+      "asset": "motifs/m011.png",
+      "bbox_px": [
+        381,
+        754,
+        107,
+        104
+      ],
+      "transform": {
+        "x": 381,
+        "y": 754,
+        "width": 107,
+        "height": 104,
+        "rotation": 0.0
+      },
+      "confidence": 0.8507524271844661,
+      "confidence_tier": "high",
+      "matte_score": 0.6744248741912293,
+      "hue": 0,
+      "saturation": 100,
+      "status": "accepted",
+      "proposal_id": "good",
+      "accepted_at": "2026-10-01T10:55:56Z",
+      "method": "exact_mask",
+      "url": "/documents/handoff_sample/motifs/m011.png"
+    },
+    {
+      "id": "m013",
+      "label": "motif",
+      "asset": "motifs/m013.png",
+      "bbox_px": [
+        900,
+        754,
+        107,
+        105
+      ],
+      "transform": {
+        "x": 900,
+        "y": 754,
+        "width": 107,
+        "height": 105,
+        "rotation": 0.0
+      },
+      "confidence": 0.8450927617033548,
+      "confidence_tier": "high",
+      "matte_score": 0.664886515353805,
+      "hue": 0,
+      "saturation": 100,
+      "status": "accepted",
+      "proposal_id": "good",
+      "accepted_at": "2026-10-01T10:55:56Z",
+      "method": "exact_mask",
+      "url": "/documents/handoff_sample/motifs/m013.png"
+    },
+    {
+      "id": "m022",
+      "label": "motif",
+      "asset": "motifs/m022.png",
+      "bbox_px": [
+        547,
+        771,
+        99,
+        102
+      ],
+      "transform": {
+        "x": 547,
+        "y": 771,
+        "width": 99,
+        "height": 102,
+        "rotation": 0.0
+      },
+      "confidence": 0.8446885069817401,
+      "confidence_tier": "high",
+      "matte_score": 0.6616161616161617,
+      "hue": 0,
+      "saturation": 100,
+      "status": "accepted",
+      "proposal_id": "good",
+      "accepted_at": "2026-10-01T10:55:56Z",
+      "method": "exact_mask",
+      "url": "/documents/handoff_sample/motifs/m022.png"
+    }
+  ],
+  "active_proposal": {
+    "proposal_id": "good",
+    "pipeline": "cv",
+    "scene_dir": "/Users/zharaskairat/Desktop/MaketheDot/auto-layer-poc/out/smoke_handoff/good",
+    "local_scene": "proposals/good/scene.json",
+    "editor": "/jobs/smoke_handoff/good/editor.html",
+    "stats": {
+      "discovered": 68,
+      "isolated": 68,
+      "high_confidence": 45,
+      "uncertain": 23,
+      "ink_coverage": 0.9940922386965553,
+      "residual_frac": 0.001567840576171875,
+      "background": {
+        "method": "flat_fill+scrub",
+        "mask_coverage": 0.42446136474609375,
+        "residual_std": 7.504803213009301,
+        "ghost_ink_frac": 0.0,
+        "gemini_used": false,
+        "bg_color": [
+          217.43226623535156,
+          235.56236267089844,
+          228.80990600585938
+        ],
+        "qa": {
+          "passed": null,
+          "history": []
+        }
+      },
+      "background_quality": "clean",
+      "partial": true,
+      "qa_passed": null,
+      "qa": {
+        "passed": null,
+        "history": []
+      }
+    },
+    "attached_at": "2026-10-01T10:55:56Z",
+    "status": "reviewed",
+    "document_editor": "/documents/handoff_sample/proposals/good/editor.html"
+  },
+  "count": 12
+}

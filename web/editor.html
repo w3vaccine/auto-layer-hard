@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Auto Layer Review</title>
+  <script src="https://unpkg.com/konva@9/konva.min.js"></script>
+  <script>
+    // Fallback if unpkg is blocked
+    if (typeof Konva === "undefined") {
+      document.write('<script src="https://cdn.jsdelivr.net/npm/konva@9/konva.min.js"><\\/script>');
+    }
+  </script>
+  <style>
+    :root {
+      --ink: #1a1a1e;
+      --muted: #6e6e76;
+      --line: #e7e7ea;
+      --canvas: #f0eef2;
+      --accent: #2a6f5b;
+      --warn: #9a6b00;
+      --bad: #a33;
+      --unc: #6b5b95;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      color: var(--ink);
+      background: var(--canvas);
+      height: 100vh;
+      display: grid;
+      grid-template-columns: 1fr 320px;
+    }
+    #stageWrap {
+      position: relative;
+      overflow: auto;
+      background: radial-gradient(#d8d6dc 1px, transparent 1px);
+      background-size: 16px 16px;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }
+    #container { box-shadow: 0 8px 32px rgba(0,0,0,.12); background: white; }
+    aside {
+      border-left: 1px solid var(--line);
+      background: #fff;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      overflow: auto;
+    }
+    h1 { font-size: 15px; margin: 0 0 4px; font-weight: 650; }
+    .meta { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+    .banner {
+      font-size: 12px; line-height: 1.4; padding: 8px 10px;
+      border-radius: 8px; background: #f7f3e8; color: var(--warn);
+      border: 1px solid #ead9a8;
+    }
+    .banner.bad { background: #f8ecec; color: var(--bad); border-color: #e8c0c0; }
+    .banner.ok { background: #eef7f3; color: var(--accent); border-color: #c5e0d4; }
+    label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 4px; }
+    input[type="range"] { width: 100%; }
+    button {
+      appearance: none; border: 1px solid var(--line); background: #fff;
+      border-radius: 8px; padding: 8px 10px; font-size: 12px; cursor: pointer;
+    }
+    button:hover { border-color: #bbb; }
+    button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    button.danger { color: #a33; }
+    .row { display: flex; gap: 6px; flex-wrap: wrap; }
+    .row button { flex: 1; text-align: center; }
+    #layerList {
+      list-style: none; margin: 0; padding: 0;
+      display: flex; flex-direction: column; gap: 4px;
+      max-height: 36vh; overflow: auto;
+    }
+    #layerList li {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 8px; border: 1px solid transparent; border-radius: 8px;
+      cursor: pointer; font-size: 12px;
+    }
+    #layerList li.active { border-color: var(--accent); background: #f3faf7; }
+    #layerList li.rejected { opacity: 0.4; }
+    #layerList li img {
+      width: 28px; height: 28px; object-fit: contain;
+      background: #f6f6f8; border-radius: 4px;
+    }
+    .tier {
+      font-size: 10px; padding: 1px 6px; border-radius: 999px;
+      background: #e8f2ee; color: var(--accent); margin-left: auto;
+    }
+    .tier.uncertain { background: #efeaf8; color: var(--unc); }
+    .tier.accepted { background: #e7f0ff; color: #2a4f8f; }
+    .tier.locked { background: #f0f0f2; color: var(--muted); }
+    #layerList li.locked { border-style: dashed; border-color: var(--line); cursor: pointer; }
+    #layerList li.section {
+      font-size: 11px; font-weight: 650; color: var(--muted);
+      padding: 8px 4px 2px; border: 0; cursor: default; background: transparent;
+    }
+    #layerList li.section.toggle { cursor: pointer; }
+    #layerList li.section.toggle:hover { color: var(--ink); }
+    .hint { font-size: 11px; color: var(--muted); line-height: 1.4; }
+    .seg { display: flex; gap: 4px; flex-wrap: wrap; }
+    .seg button { flex: 1; min-width: 72px; padding: 6px; font-size: 11px; }
+    .seg button.on { border-color: var(--accent); background: #f3faf7; }
+  </style>
+</head>
+<body>
+  <div id="stageWrap"><div id="container"></div></div>
+  <aside>
+    <div>
+      <h1>Auto Layer Review</h1>
+      <div class="meta" id="meta">Loading scene…</div>
+      <div id="banner" class="banner" hidden></div>
+    </div>
+
+    <div class="seg" id="viewMode">
+      <button type="button" data-view="base" class="on">Working base</button>
+      <button type="button" data-view="original">Original</button>
+      <button type="button" data-view="bg">BG only</button>
+      <button type="button" data-view="residual">Residual</button>
+    </div>
+
+    <div class="row">
+      <button type="button" class="primary" id="btnAccept">Accept</button>
+      <button type="button" id="btnAcceptHigh">Accept all high</button>
+    </div>
+    <div class="row">
+      <button type="button" id="btnMerge">Merge selected</button>
+      <button type="button" class="danger" id="btnReject">Reject</button>
+    </div>
+    <div class="row">
+      <button type="button" id="btnDup">Duplicate</button>
+      <button type="button" id="btnHide">Hide / Show</button>
+    </div>
+    <div>
+      <label for="hue">Hue rotate <span id="hueVal">0°</span></label>
+      <input type="range" id="hue" min="-180" max="180" value="0" />
+    </div>
+    <div>
+      <label for="sat">Saturation <span id="satVal">100%</span></label>
+      <input type="range" id="sat" min="0" max="200" value="100" />
+    </div>
+    <div class="row">
+      <button type="button" id="btnReset">Reset hue</button>
+      <button type="button" id="btnExport">Export JSON</button>
+    </div>
+    <div class="row">
+      <button type="button" class="primary" id="btnPushLayers">Push accepted → Layers Menu</button>
+    </div>
+    <div class="row">
+      <button type="button" class="primary" id="btnMotifPack">Download motif pack</button>
+    </div>
+    <div class="meta" id="docStatus"></div>
+    <div>
+      <label>Layers Menu <span class="meta" id="layerStats"></span></label>
+      <ul id="layerList"></ul>
+    </div>
+    <p class="hint">
+      Proposal review: accept high-confidence items first (uncertain is collapsed).
+      Residual sheet is locked — leftover ink stays in the working base.
+      Motif pack = ZIP of accepted PNGs + motifs.json for Layers Menu / Pattern Placement.
+      Shift-click to merge. Rerun creates a <b>new proposal</b>.
+    </p>
+  </aside>
+  <script src="https://unpkg.com/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script src="editor.js"></script>
+</body>
+</html>
