@@ -142,14 +142,15 @@ def _gemini_extract_crop(
         crop_rgb.save(buf, format="PNG")
         prompt = (
             f"You are cutting a single textile motif for a layers menu.\n"
-            f"Subject: {label or 'the primary motif'} at the center of this crop.\n\n"
-            "Hard rules:\n"
-            "- Return a PNG with a real alpha channel (transparent background).\n"
-            "- Keep ONLY that one complete motif (full silhouette, holes in leaves stay transparent).\n"
-            "- Do NOT include neighboring leaves/fronds/flowers that overlap or sit behind it.\n"
-            "- Do NOT fill holes with background color — leave them transparent.\n"
-            "- Do not add shadows, outlines, or new elements. Preserve original colors and edges.\n"
-            "- If multiple motifs are visible, pick the main centered one only."
+            f"Subject: {label or 'the primary motif'} nearest the center of this crop.\n\n"
+            "Output requirements:\n"
+            "- PNG with a REAL alpha channel (alpha=0 = transparent). "
+            "Never draw a checkerboard, grid, or fake transparency pattern.\n"
+            "- Keep ONLY that one complete motif. Exclude every neighboring leaf/frond/flower "
+            "even if it overlaps or sits behind the subject.\n"
+            "- Natural holes (e.g. monstera fenestrations) must be transparent, not filled.\n"
+            "- Preserve original print colors and edges. No shadows, outlines, or new pixels.\n"
+            "- If unsure which motif is primary, pick the largest one touching the crop center."
         )
         resp = client.models.generate_content(
             model=model,
@@ -169,39 +170,77 @@ def _gemini_extract_crop(
                     img = Image.open(BytesIO(inline.data)).convert("RGBA")
                     arr = np.array(img)
                     arr = _ensure_cutout_alpha(arr, np.array(crop_rgb.convert("RGB")))
+                    if arr is None:
+                        return None
                     return arr
     except Exception as exc:  # noqa: BLE001
         print(f"    gemini extract fallback failed: {exc}")
     return None
 
 
-def _ensure_cutout_alpha(rgba: np.ndarray, crop_rgb: np.ndarray) -> np.ndarray:
-    """If the model returns opaque white/flat bg, rebuild alpha from edge vs crop."""
+def _ensure_cutout_alpha(rgba: np.ndarray, crop_rgb: np.ndarray) -> np.ndarray | None:
+    """Normalize Gemini cutout alpha; return None if the model faked transparency."""
     out = rgba.copy()
-    a = out[:, :, 3]
-    if float(a.mean()) < 240:
-        return out
-    # Opaque output — treat pixels near the crop's border median as background
-    h, w = out.shape[:2]
-    b = max(2, min(6, h // 16, w // 16))
-    border = np.concatenate(
-        [
-            crop_rgb[:b].reshape(-1, 3),
-            crop_rgb[-b:].reshape(-1, 3),
-            crop_rgb[:, :b].reshape(-1, 3),
-            crop_rgb[:, -b:].reshape(-1, 3),
-        ],
-        axis=0,
-    ).astype(np.float32)
-    bg = np.median(border, axis=0)
-    # Also kill near-white
+    a = out[:, :, 3].astype(np.float32)
     rgb = out[:, :, :3].astype(np.float32)
-    d = np.sqrt(((rgb - bg) ** 2).sum(axis=2))
-    white = rgb.mean(axis=2)
-    alpha = np.clip((d - 12.0) / 20.0, 0, 1)
-    alpha[white > 245] = 0
-    out[:, :, 3] = (alpha * 255).astype(np.uint8)
+
+    # Reject obvious checkerboard / grid "transparency" renders
+    if _looks_like_checkerboard(out):
+        print("    gemini reject: checkerboard/fake transparency")
+        return None
+
+    if float(a.mean()) >= 240:
+        # Opaque output — rebuild alpha from crop border color + kill near-white
+        h, w = out.shape[:2]
+        b = max(2, min(6, h // 16, w // 16))
+        border = np.concatenate(
+            [
+                crop_rgb[:b].reshape(-1, 3),
+                crop_rgb[-b:].reshape(-1, 3),
+                crop_rgb[:, :b].reshape(-1, 3),
+                crop_rgb[:, -b:].reshape(-1, 3),
+            ],
+            axis=0,
+        ).astype(np.float32)
+        bg = np.median(border, axis=0)
+        d = np.sqrt(((rgb - bg) ** 2).sum(axis=2))
+        white = rgb.mean(axis=2)
+        alpha = np.clip((d - 12.0) / 20.0, 0, 1)
+        alpha[white > 245] = 0
+        out[:, :, 3] = (alpha * 255).astype(np.uint8)
     return out
+
+
+def _looks_like_checkerboard(rgba: np.ndarray) -> bool:
+    """Detect common model failure: drawing a checker instead of alpha."""
+    rgb = rgba[:, :, :3].astype(np.float32)
+    h, w = rgb.shape[:2]
+    if h < 16 or w < 16:
+        return False
+    # Sample a coarse grid of 8x8 blocks; checkerboards have high neighbor contrast
+    # with only ~2 dominant colors in "background-looking" regions.
+    small = cv2.resize(rgb, (64, 64), interpolation=cv2.INTER_AREA)
+    # High-frequency tile signal: difference between even/odd cells
+    a = small[0::2, 0::2].reshape(-1, 3)
+    b = small[0::2, 1::2].reshape(-1, 3)
+    c = small[1::2, 0::2].reshape(-1, 3)
+    d = small[1::2, 1::2].reshape(-1, 3)
+    n = min(len(a), len(b), len(c), len(d))
+    if n < 20:
+        return False
+    pair = np.mean(np.abs(a[:n] - b[:n]) + np.abs(c[:n] - d[:n]), axis=1)
+    # Also check for near-white + mid-gray / green-white alternating (common)
+    lum = small.mean(axis=2)
+    hi = float((lum > 230).mean())
+    mid = float(((lum > 80) & (lum < 200)).mean())
+    if float(np.median(pair)) > 35 and hi > 0.15 and mid > 0.15:
+        return True
+    # Green/white checker specifically (seen in failed extracts)
+    g = small[:, :, 1]
+    if float(((g > 100) & (lum < 200)).mean()) > 0.2 and float((lum > 240).mean()) > 0.15:
+        if float(np.median(pair)) > 28:
+            return True
+    return False
 
 
 def isolate_motifs(
