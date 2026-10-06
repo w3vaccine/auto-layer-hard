@@ -1245,6 +1245,13 @@ def _hybrid_residual_fill(
                 if mask_frac > 0.12 or bbox_frac > 0.16 or (multi and bbox_frac > 0.06):
                     dropped_giant += 1
                     continue
+                # Fragmented / shard layers (mustard m009/m013)
+                if sizes and sizes[0] / max(1, int(mask_frac * img_px)) < 0.65:
+                    dropped_giant += 1
+                    continue
+                if mask_frac < 0.0025 and n_cc > 5:
+                    dropped_giant += 1
+                    continue
                 pruned.append(inst)
             filled = pruned
             meta["fill_cap"] = fill_cap

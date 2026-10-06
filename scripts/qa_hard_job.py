@@ -60,7 +60,7 @@ def qa_job(job_id: str, out: Path) -> dict:
             and area_frac > 0.04
         ):
             flags.append("multi_motif")
-        if border_opaque > 0.35 and area_frac > 0.04:
+        if border_opaque > 0.45 and area_frac > 0.12:
             flags.append("border_bleed")
         if opaque < 0.03 and area_frac < 0.015:
             flags.append("tiny")
