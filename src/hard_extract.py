@@ -560,84 +560,105 @@ def _exclusive_alphas(instances: list[MotifInstance]) -> list[MotifInstance]:
 def boxes_to_instances_graphic(
     image: Image.Image,
     boxes: list[MotifBox],
+    *,
+    api_key: str | None = None,
+    extract_model: str = "gemini-2.5-flash-image",
 ) -> list[MotifInstance]:
-    """Busy/sharp graphics: multi-seed watershed cutouts (VLM box = seed only).
+    """Busy/sharp graphics: Gemini cutout per VLM box, watershed fallback.
 
-    SAM soft-alpha chops leaves and fills holes. Here each VLM center is a
-    watershed marker on the full canvas so motifs grow to their natural
-    silhouette (including past a clipped box) and neighbors compete.
+    Gemini decides what belongs to the motif (neighbors out, holes transparent).
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from isolate import _bbox_to_pixels, _gemini_extract_crop
     from segment import estimate_background_color, lab_distance
 
     rgb = np.array(image.convert("RGB"))
     h, w = rgb.shape[:2]
     bg = estimate_background_color(rgb)
     dist_bg = lab_distance(rgb, bg)
-    ink = dist_bg > 11.0
-
-    centers: list[tuple[int, int]] = []
-    for b in boxes:
-        x, y, bw, bh = b.bbox_norm
-        cx, cy = int((x + bw / 2) * w), int((y + bh / 2) * h)
-        cx, cy = int(np.clip(cx, 0, w - 1)), int(np.clip(cy, 0, h - 1))
-        # Snap seed onto ink inside the box if center landed in a hole/ground
-        if not ink[cy, cx]:
-            x0, y0, x1, y1 = _bbox_xyxy(b.bbox_norm, w, h, pad=0.0)
-            roi_ink = ink[y0:y1, x0:x1]
-            if roi_ink.any():
-                ys, xs = np.where(roi_ink)
-                i = int(np.argmin((ys + y0 - cy) ** 2 + (xs + x0 - cx) ** 2))
-                cy, cx = int(ys[i] + y0), int(xs[i] + x0)
-        centers.append((cx, cy))
-
-    print(f"  graphic matte {len(boxes)} seeds (full-image watershed)…")
-    t0 = time.time()
-    markers = np.zeros((h, w), dtype=np.int32)
-    markers[~ink] = 1  # ground / holes = background
-    # Border as bg so edge-cropped motifs don't flood the frame
-    markers[0, :] = 1
-    markers[-1, :] = 1
-    markers[:, 0] = 1
-    markers[:, -1] = 1
-    seed_r = max(5, min(h, w) // 80)
-    for i, (cx, cy) in enumerate(centers):
-        cv2.circle(markers, (cx, cy), seed_r, i + 2, -1)
-        # Never plant FG on clear ground
-        if dist_bg[cy, cx] < 9.0:
-            markers[cy, cx] = 1
+    img_px = float(h * w)
 
     try:
-        cv2.watershed(rgb.copy(), markers)
-    except Exception as exc:  # noqa: BLE001
-        print(f"  watershed failed ({exc}) — per-box fallback")
-        return _boxes_to_instances_graphic_fallback(rgb, boxes, bg)
+        extract_cap = max(4, int(os.environ.get("HARD_BUSY_GEMINI_EXTRACT", "20")))
+    except ValueError:
+        extract_cap = 20
+    # Prefer larger boxes for Gemini budget
+    ordered = sorted(enumerate(boxes), key=lambda ib: -ib[1].area())
+    extract_idx = {i for i, _ in ordered[: min(extract_cap, len(boxes))]}
+
+    print(
+        f"  graphic cutouts: Gemini extract on {len(extract_idx)}/{len(boxes)} "
+        f"(fallback=watershed)…"
+    )
+    t0 = time.time()
+
+    def _one_gemini(i: int, b: MotifBox) -> tuple[int, np.ndarray | None]:
+        x0, y0, x1, y1 = _bbox_to_pixels(b.bbox_norm, w, h, pad=0.12)
+        crop = rgb[y0:y1, x0:x1]
+        if crop.size == 0:
+            return i, None
+        gem = _gemini_extract_crop(
+            Image.fromarray(crop),
+            b.label or "motif",
+            api_key,
+            model=extract_model,
+        )
+        if gem is None:
+            return i, None
+        if gem.shape[0] != crop.shape[0] or gem.shape[1] != crop.shape[1]:
+            gem = np.array(
+                Image.fromarray(gem).resize(
+                    (crop.shape[1], crop.shape[0]), Image.Resampling.LANCZOS
+                )
+            )
+        alpha_full = np.zeros((h, w), dtype=np.uint8)
+        a = gem[:, :, 3]
+        # Prefer original print pixels under the cutout (don't trust Gemini RGB edits)
+        # but punch clear ground so holes stay open
+        local = a.copy()
+        roi_bg = dist_bg[y0:y1, x0:x1]
+        local[roi_bg < 8.0] = (local[roi_bg < 8.0].astype(np.float32) * 0.15).astype(np.uint8)
+        alpha_full[y0:y1, x0:x1] = local
+        if int((alpha_full > 20).sum()) < 40:
+            return i, None
+        return i, alpha_full
+
+    gem_alphas: dict[int, np.ndarray] = {}
+    if api_key and extract_idx:
+        workers = min(4, len(extract_idx))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futs = [pool.submit(_one_gemini, i, boxes[i]) for i in extract_idx]
+            for fut in as_completed(futs):
+                try:
+                    i, alpha = fut.result()
+                except Exception as exc:  # noqa: BLE001
+                    print(f"  gemini extract worker failed: {exc}")
+                    continue
+                if alpha is not None:
+                    gem_alphas[i] = alpha
+                    print(f"    gemini ok {boxes[i].id} ({boxes[i].label})")
+
+    # Watershed fallback for misses / no API
+    need_ws = [i for i in range(len(boxes)) if i not in gem_alphas]
+    ws_instances: dict[int, MotifInstance] = {}
+    if need_ws:
+        print(f"  watershed fallback for {len(need_ws)} boxes…")
+        fb = _watershed_instances_for_indices(rgb, boxes, bg, dist_bg, need_ws)
+        ws_instances = fb
 
     instances: list[MotifInstance] = []
-    img_px = float(h * w)
     for i, b in enumerate(boxes):
-        keep = (markers == (i + 2)) & ink
-        if not keep.any():
+        if i in gem_alphas:
+            alpha = gem_alphas[i]
+            method_conf = max(float(b.confidence), 0.78)
+        elif i in ws_instances:
+            instances.append(ws_instances[i])
             continue
-        # Keep largest CC (drop speckles from watershed bleed)
-        n, lab = cv2.connectedComponents(keep.astype(np.uint8), 8)
-        if n > 1:
-            areas = [(int((lab == j).sum()), j) for j in range(1, n)]
-            areas.sort(reverse=True)
-            keep = lab == areas[0][1]
-            # If seed not in largest, prefer CC containing seed
-            cx, cy = centers[i]
-            if lab[cy, cx] > 0:
-                keep = lab == lab[cy, cx]
-
-        a = keep.astype(np.float32)
-        a = cv2.GaussianBlur(a, (0, 0), 0.45)
-        a = np.clip(a, 0, 1)
-        a[dist_bg < 7.5] = 0.0
-        alpha = (a * 255.0).astype(np.uint8)
-        if int((alpha > 20).sum()) < 40:
+        else:
             continue
         if float((alpha > 20).sum()) / img_px > 0.4:
-            print(f"  skip {b.id}: basin covers >40% of image")
+            print(f"  skip {b.id}: cutout covers >40% of image")
             continue
         ys, xs = np.where(alpha > 20)
         x0, x1 = int(xs.min()), int(xs.max()) + 1
@@ -647,7 +668,7 @@ def boxes_to_instances_graphic(
                 id=b.id,
                 label=b.label or "motif",
                 bbox_norm=[x0 / w, y0 / h, (x1 - x0) / w, (y1 - y0) / h],
-                confidence=float(b.confidence),
+                confidence=method_conf,
                 mask=alpha,
                 pass_index=b.pass_index,
             )
@@ -655,13 +676,106 @@ def boxes_to_instances_graphic(
 
     before = len(instances)
     instances = _exclusive_alphas(instances)
-    # Drop near-duplicate basins (two seeds on one leaf)
     instances = _dedupe_mask_instances(instances, iou_thr=0.55)
     print(
-        f"  graphic matte done in {time.time() - t0:.1f}s → {len(instances)} "
-        f"(seeds {len(boxes)}, pre-dedupe {before})"
+        f"  graphic cutouts done in {time.time() - t0:.1f}s → {len(instances)} "
+        f"(gemini {len(gem_alphas)}, ws {len(ws_instances)}, pre {before})"
     )
     return instances
+
+
+def _watershed_instances_for_indices(
+    rgb: np.ndarray,
+    boxes: list[MotifBox],
+    bg: np.ndarray,
+    dist_bg: np.ndarray,
+    indices: list[int],
+) -> dict[int, MotifInstance]:
+    """Run full-image multi-seed watershed but only emit selected box indices."""
+    h, w = rgb.shape[:2]
+    ink = dist_bg > 11.0
+    centers: list[tuple[int, int]] = []
+    for b in boxes:
+        x, y, bw, bh = b.bbox_norm
+        cx, cy = int((x + bw / 2) * w), int((y + bh / 2) * h)
+        cx, cy = int(np.clip(cx, 0, w - 1)), int(np.clip(cy, 0, h - 1))
+        if not ink[cy, cx]:
+            x0, y0, x1, y1 = _bbox_xyxy(b.bbox_norm, w, h, pad=0.0)
+            roi_ink = ink[y0:y1, x0:x1]
+            if roi_ink.any():
+                ys, xs = np.where(roi_ink)
+                j = int(np.argmin((ys + y0 - cy) ** 2 + (xs + x0 - cx) ** 2))
+                cy, cx = int(ys[j] + y0), int(xs[j] + x0)
+        centers.append((cx, cy))
+
+    markers = np.zeros((h, w), dtype=np.int32)
+    markers[~ink] = 1
+    markers[0, :] = 1
+    markers[-1, :] = 1
+    markers[:, 0] = 1
+    markers[:, -1] = 1
+    seed_r = max(5, min(h, w) // 80)
+    for i, (cx, cy) in enumerate(centers):
+        cv2.circle(markers, (cx, cy), seed_r, i + 2, -1)
+        if dist_bg[cy, cx] < 9.0:
+            markers[cy, cx] = 1
+    try:
+        cv2.watershed(rgb.copy(), markers)
+    except Exception:  # noqa: BLE001
+        out: dict[int, MotifInstance] = {}
+        for i in indices:
+            alpha = seeded_graphic_matte(rgb, boxes[i].bbox_norm, bg)
+            if int((alpha > 20).sum()) < 40:
+                continue
+            ys, xs = np.where(alpha > 20)
+            x0, x1 = int(xs.min()), int(xs.max()) + 1
+            y0, y1 = int(ys.min()), int(ys.max()) + 1
+            b = boxes[i]
+            out[i] = MotifInstance(
+                id=b.id,
+                label=b.label or "motif",
+                bbox_norm=[x0 / w, y0 / h, (x1 - x0) / w, (y1 - y0) / h],
+                confidence=float(b.confidence),
+                mask=alpha,
+                pass_index=b.pass_index,
+            )
+        return out
+
+    out = {}
+    img_px = float(h * w)
+    for i in indices:
+        keep = (markers == (i + 2)) & ink
+        if not keep.any():
+            continue
+        n, lab = cv2.connectedComponents(keep.astype(np.uint8), 8)
+        if n > 1:
+            cx, cy = centers[i]
+            if lab[cy, cx] > 0:
+                keep = lab == lab[cy, cx]
+            else:
+                areas = [(int((lab == j).sum()), j) for j in range(1, n)]
+                areas.sort(reverse=True)
+                keep = lab == areas[0][1]
+        a = keep.astype(np.float32)
+        a = cv2.GaussianBlur(a, (0, 0), 0.45)
+        a = np.clip(a, 0, 1)
+        a[dist_bg < 7.5] = 0.0
+        alpha = (a * 255.0).astype(np.uint8)
+        if int((alpha > 20).sum()) < 40 or float((alpha > 20).sum()) / img_px > 0.4:
+            continue
+        ys, xs = np.where(alpha > 20)
+        x0, x1 = int(xs.min()), int(xs.max()) + 1
+        y0, y1 = int(ys.min()), int(ys.max()) + 1
+        b = boxes[i]
+        out[i] = MotifInstance(
+            id=b.id,
+            label=b.label or "motif",
+            bbox_norm=[x0 / w, y0 / h, (x1 - x0) / w, (y1 - y0) / h],
+            confidence=float(b.confidence),
+            mask=alpha,
+            pass_index=b.pass_index,
+        )
+    return out
 
 
 def _dedupe_mask_instances(
@@ -688,40 +802,16 @@ def _dedupe_mask_instances(
     return kept
 
 
-def _boxes_to_instances_graphic_fallback(
-    rgb: np.ndarray, boxes: list[MotifBox], bg: np.ndarray
-) -> list[MotifInstance]:
-    h, w = rgb.shape[:2]
-    instances: list[MotifInstance] = []
-    for b in boxes:
-        alpha = seeded_graphic_matte(rgb, b.bbox_norm, bg, competitor_xy=None)
-        if int((alpha > 20).sum()) < 30:
-            continue
-        ys, xs = np.where(alpha > 20)
-        x0, x1 = int(xs.min()), int(xs.max()) + 1
-        y0, y1 = int(ys.min()), int(ys.max()) + 1
-        instances.append(
-            MotifInstance(
-                id=b.id,
-                label=b.label or "motif",
-                bbox_norm=[x0 / w, y0 / h, (x1 - x0) / w, (y1 - y0) / h],
-                confidence=float(b.confidence),
-                mask=alpha,
-                pass_index=b.pass_index,
-            )
-        )
-    return _exclusive_alphas(instances)
-
-
 def boxes_to_instances_sam(
     image: Image.Image,
     boxes: list[MotifBox],
     *,
     print_type: str,
     sam_model_name: str = "sam2_b.pt",
+    api_key: str | None = None,
 ) -> list[MotifInstance]:
     if print_type == "busy":
-        return boxes_to_instances_graphic(image, boxes)
+        return boxes_to_instances_graphic(image, boxes, api_key=api_key)
 
     rgb = np.array(image.convert("RGB"))
     h, w = rgb.shape[:2]
@@ -1142,14 +1232,20 @@ def discover_hard_motifs(
     print(f"  hard discover done in {time.time() - t_hard:.1f}s → {len(boxes)} boxes")
     t_sam = time.time()
     instances = boxes_to_instances_sam(
-        image, boxes, print_type=print_type, sam_model_name=sam_model
+        image,
+        boxes,
+        print_type=print_type,
+        sam_model_name=sam_model,
+        api_key=api_key,
     )
     meta["sam_seconds"] = round(time.time() - t_sam, 2)
+    meta["method"] = "vlm_gemini_extract_hybrid"
     for inst in instances:
         inst.confidence = max(float(inst.confidence), 0.62)
 
     before = len(instances)
-    instances = _merge_overlapping(instances, iou_thr=0.45)
+    # Gemini cutouts already exclusive — only light merge for near-dupes
+    instances = _merge_overlapping(instances, iou_thr=0.62)
     meta["merged_from"] = before
     meta["merged_to"] = len(instances)
 

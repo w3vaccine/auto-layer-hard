@@ -132,7 +132,7 @@ def _gemini_extract_crop(
     api_key: str | None,
     model: str = "gemini-2.5-flash-image",
 ) -> np.ndarray | None:
-    """Ask Gemini to return a transparent cutout; best-effort."""
+    """Ask Gemini to return a transparent cutout of ONE motif; best-effort."""
     try:
         from google import genai
         from google.genai import types
@@ -141,9 +141,15 @@ def _gemini_extract_crop(
         buf = BytesIO()
         crop_rgb.save(buf, format="PNG")
         prompt = (
-            f"Extract ONLY the {label} motif from this crop onto a fully transparent background. "
-            "Return a PNG with alpha. Do not add shadows, backgrounds, or extra elements. "
-            "Preserve original colors and edges."
+            f"You are cutting a single textile motif for a layers menu.\n"
+            f"Subject: {label or 'the primary motif'} at the center of this crop.\n\n"
+            "Hard rules:\n"
+            "- Return a PNG with a real alpha channel (transparent background).\n"
+            "- Keep ONLY that one complete motif (full silhouette, holes in leaves stay transparent).\n"
+            "- Do NOT include neighboring leaves/fronds/flowers that overlap or sit behind it.\n"
+            "- Do NOT fill holes with background color — leave them transparent.\n"
+            "- Do not add shadows, outlines, or new elements. Preserve original colors and edges.\n"
+            "- If multiple motifs are visible, pick the main centered one only."
         )
         resp = client.models.generate_content(
             model=model,
@@ -161,10 +167,41 @@ def _gemini_extract_crop(
                 inline = getattr(part, "inline_data", None)
                 if inline and getattr(inline, "data", None):
                     img = Image.open(BytesIO(inline.data)).convert("RGBA")
-                    return np.array(img)
+                    arr = np.array(img)
+                    arr = _ensure_cutout_alpha(arr, np.array(crop_rgb.convert("RGB")))
+                    return arr
     except Exception as exc:  # noqa: BLE001
         print(f"    gemini extract fallback failed: {exc}")
     return None
+
+
+def _ensure_cutout_alpha(rgba: np.ndarray, crop_rgb: np.ndarray) -> np.ndarray:
+    """If the model returns opaque white/flat bg, rebuild alpha from edge vs crop."""
+    out = rgba.copy()
+    a = out[:, :, 3]
+    if float(a.mean()) < 240:
+        return out
+    # Opaque output — treat pixels near the crop's border median as background
+    h, w = out.shape[:2]
+    b = max(2, min(6, h // 16, w // 16))
+    border = np.concatenate(
+        [
+            crop_rgb[:b].reshape(-1, 3),
+            crop_rgb[-b:].reshape(-1, 3),
+            crop_rgb[:, :b].reshape(-1, 3),
+            crop_rgb[:, -b:].reshape(-1, 3),
+        ],
+        axis=0,
+    ).astype(np.float32)
+    bg = np.median(border, axis=0)
+    # Also kill near-white
+    rgb = out[:, :, :3].astype(np.float32)
+    d = np.sqrt(((rgb - bg) ** 2).sum(axis=2))
+    white = rgb.mean(axis=2)
+    alpha = np.clip((d - 12.0) / 20.0, 0, 1)
+    alpha[white > 245] = 0
+    out[:, :, 3] = (alpha * 255).astype(np.uint8)
+    return out
 
 
 def isolate_motifs(
