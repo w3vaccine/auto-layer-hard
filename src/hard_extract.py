@@ -775,8 +775,17 @@ def boxes_to_instances_graphic(
     kept: list[MotifInstance] = []
     for inst in instances:
         frac = float((inst.mask > 20).sum()) / img_px
-        if frac > 0.28:
+        if frac > 0.22:
             print(f"  drop {inst.id}: giant layer frac={frac:.2f}")
+            continue
+        # Reject cutouts that still cover multiple seed centers
+        solid = inst.mask > 140
+        seeds_hit = 0
+        for cx, cy in centers:
+            if 0 <= cy < h and 0 <= cx < w and solid[cy, cx]:
+                seeds_hit += 1
+        if seeds_hit >= 2:
+            print(f"  drop {inst.id}: covers {seeds_hit} seed centers")
             continue
         kept.append(inst)
     instances = kept
@@ -1176,11 +1185,18 @@ def _hybrid_residual_fill(
             # After Gemini/watershed primary, keep residual fill conservative — otherwise
             # CV shards explode the layers menu (17 → 48 on mustard tropical).
             n_primary = len(instances)
-            if n_primary >= 8:
+            if n_primary >= 12:
+                # Enough clean Gemini/WS motifs — absorb leftovers into them only.
+                # New residual layers were gluing multi-motif giants (mustard m015).
+                target = 0.78
+                min_area = max(300, int(0.003 * h * w))
+                rounds = 1
+                fill_cap = n_primary  # no new residual layers
+            elif n_primary >= 8:
                 target = 0.82
                 min_area = max(200, int(0.0025 * h * w))
                 rounds = 2
-                fill_cap = min(max_instances, n_primary + 8)
+                fill_cap = min(max_instances, n_primary + 6)
             else:
                 target = 0.97
                 min_area = max(60, int(0.0006 * h * w))
@@ -1210,10 +1226,10 @@ def _hybrid_residual_fill(
                 bbox_frac = float(bb[2]) * float(bb[3])
                 is_residual = inst.id not in primary_ids
                 # Residual glued blobs: mask OR large bbox (area_frac is bbox)
-                if is_residual and (mask_frac > 0.10 or bbox_frac > 0.16):
+                if is_residual and (mask_frac > 0.07 or bbox_frac > 0.12):
                     dropped_giant += 1
                     continue
-                if mask_frac > 0.22 or bbox_frac > 0.35:
+                if mask_frac > 0.18 or bbox_frac > 0.30:
                     dropped_giant += 1
                     continue
                 pruned.append(inst)

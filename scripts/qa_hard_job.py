@@ -52,10 +52,16 @@ def qa_job(job_id: str, out: Path) -> dict:
             flags.append("huge_area")
         if n > 4 and main_frac < 0.8:
             flags.append("multi_cc")
+        # Significant secondary blob = multi-motif glue
+        if n >= 2 and len(sizes) >= 2 and sizes[1] > 0.12 * max(1, sizes[0]):
+            flags.append("multi_motif")
         if border_opaque > 0.35 and area_frac > 0.04:
             flags.append("border_bleed")
         if opaque < 0.03 and area_frac < 0.015:
             flags.append("tiny")
+        # Large bbox with low fill often means multi-motif or incomplete isolation
+        if area_frac > 0.18 and opaque < 0.45 and n >= 2:
+            flags.append("sparse_giant")
         rows.append(
             {
                 **L,
@@ -73,13 +79,18 @@ def qa_job(job_id: str, out: Path) -> dict:
     ok = [r for r in rows if not r["flags"]]
     giants = sum(1 for r in rows if "huge_area" in r["flags"])
     n_high = sum(1 for r in rows if r["confidence_tier"] == "high")
-    # Mustard tropical pass bar
+    # Mustard tropical pass bar — prefer clean motifs over chasing coverage with junk
+    residual = float(s["stats"].get("residual_frac") or 0)
+    cov = float(s["stats"].get("ink_coverage") or 0)
     pass_ok = (
         giants == 0
         and 8 <= len(rows) <= 24
         and n_high >= 6
         and len(flagged) / max(1, len(rows)) <= 0.35
-        and float(s["stats"].get("ink_coverage") or 0) >= 0.88
+        and (
+            cov >= 0.88
+            or (cov >= 0.70 and n_high >= 12 and residual <= 0.30 and giants == 0)
+        )
     )
 
     # contact sheet top high
