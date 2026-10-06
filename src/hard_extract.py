@@ -1118,21 +1118,34 @@ def _hybrid_residual_fill(
         if print_type == "busy":
             # Prefer NEW whole-motif layers over gluing leftovers into the few SAM seeds.
             # absorb_any_touch=True was collapsing tropical/fox prints into 1–3 blobs.
-            target = 0.97
-            min_area = max(60, int(0.0006 * h * w))
+            # After Gemini/watershed primary, keep residual fill conservative — otherwise
+            # CV shards explode the layers menu (17 → 48 on mustard tropical).
+            n_primary = len(instances)
+            if n_primary >= 8:
+                target = 0.90
+                min_area = max(200, int(0.0025 * h * w))
+                rounds = 2
+                fill_cap = min(max_instances, n_primary + 12)
+            else:
+                target = 0.97
+                min_area = max(60, int(0.0006 * h * w))
+                rounds = 4
+                fill_cap = max_instances
             filled = _cv_residual_gapfill(
                 rgb,
                 soft,
                 instances,
                 bg=bg,
-                max_instances=max_instances,
+                max_instances=fill_cap,
                 min_area=min_area,
-                max_rounds=4,
+                max_rounds=rounds,
                 target_coverage=target,
                 absorb_dilate=9,
                 absorb_any_touch=False,
             )
             filled = _merge_touching_small(filled, min_keep_area=int(0.0008 * h * w))
+            meta["fill_cap"] = fill_cap
+            meta["min_area"] = min_area
         else:
             target = 0.985
             filled = _cv_residual_gapfill(
