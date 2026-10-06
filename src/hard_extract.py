@@ -1123,8 +1123,7 @@ def _merge_touching_small(
                 instances[best_j].bbox_norm = [x0 / w, y0 / h, (x1 - x0) / w, (y1 - y0) / h]
             alive[i] = False
     kept = [instances[i] for i in range(len(instances)) if alive[i]]
-    for n, inst in enumerate(kept, start=1):
-        inst.id = f"m{n:03d}"
+    # Do not renumber here — residual prune needs stable primary vs residual ids.
     print(f"  merge small residuals: {len(instances)} → {len(kept)}")
     return kept
 
@@ -1179,23 +1178,35 @@ def _hybrid_residual_fill(
         bg = estimate_background_color(rgb)
         _dist, _mode = ink_distance(rgb, bg)
         soft = np.clip((_dist - 8.0) / 16.0, 0, 1)
+        # Capture before gapfill mutates/extends instances (residual prune + conf).
+        primary_ids = {inst.id for inst in instances}
         if print_type == "busy":
             # Prefer NEW whole-motif layers over gluing leftovers into the few SAM seeds.
             # absorb_any_touch=True was collapsing tropical/fox prints into 1–3 blobs.
             # After Gemini/watershed primary, keep residual fill conservative — otherwise
             # CV shards explode the layers menu (17 → 48 on mustard tropical).
             n_primary = len(instances)
-            if n_primary >= 12:
+            primary_masks = {
+                inst.id: inst.mask.copy() for inst in instances
+            }
+            dist0, _ = ink_distance(rgb, bg)
+            ink0 = dist0 > 11.0
+            union0 = np.zeros((h, w), dtype=bool)
+            for inst in instances:
+                union0 |= inst.mask > 40
+            primary_cov0 = float((union0 & ink0).sum()) / max(1, int(ink0.sum()))
+            if n_primary >= 12 and primary_cov0 >= 0.62:
                 # Prefer absorbing into Gemini cutouts; allow a few small new pieces
                 target = 0.88
                 min_area = max(250, int(0.0028 * h * w))
                 rounds = 2
                 fill_cap = min(max_instances, n_primary + 4)
             elif n_primary >= 8:
-                target = 0.88
-                min_area = max(200, int(0.0025 * h * w))
-                rounds = 2
-                fill_cap = min(max_instances, n_primary + 6)
+                # Low primary coverage → more single-CC residual layers, not glue
+                target = 0.90
+                min_area = max(160, int(0.0018 * h * w))
+                rounds = 3
+                fill_cap = min(max_instances, n_primary + 8)
             else:
                 target = 0.97
                 min_area = max(60, int(0.0006 * h * w))
@@ -1210,15 +1221,16 @@ def _hybrid_residual_fill(
                 min_area=min_area,
                 max_rounds=rounds,
                 target_coverage=target,
-                absorb_dilate=9,
+                # Tight fringe only — wide absorb swells Gemini into sparse giants
+                absorb_dilate=5,
                 absorb_any_touch=False,
             )
             filled = _merge_touching_small(filled, min_keep_area=int(0.0008 * h * w))
-            # Drop glued / multi-motif layers (primaries can grow via absorb too)
+            # Drop glued / multi-motif residual; revert primaries swollen by absorb
             img_px = float(h * w)
-            primary_ids = {inst.id for inst in instances}
             pruned: list[MotifInstance] = []
             dropped_giant = 0
+            reverted_primary = 0
             for inst in filled:
                 ys, xs = np.where(inst.mask > 20)
                 if len(xs) == 0:
@@ -1238,10 +1250,80 @@ def _hybrid_residual_fill(
                 multi = (
                     len(sizes) >= 2 and sizes[1] > 0.12 * max(1, sizes[0])
                 )
-                if is_residual and (mask_frac > 0.06 or bbox_frac > 0.11 or multi):
-                    dropped_giant += 1
+                opaque = mask_frac / max(bbox_frac, 1e-6)
+                sparse = bbox_frac > 0.12 and opaque < 0.45
+                # Primaries swollen into sparse multi-motif glue → restore pre-absorb
+                if (
+                    not is_residual
+                    and inst.id in primary_masks
+                    and (sparse or (bbox_frac > 0.16 and opaque < 0.55) or multi)
+                ):
+                    inst.mask = primary_masks[inst.id]
+                    ys, xs = np.where(inst.mask > 20)
+                    if len(xs) == 0:
+                        dropped_giant += 1
+                        continue
+                    x0, x1 = int(xs.min()), int(xs.max()) + 1
+                    y0, y1 = int(ys.min()), int(ys.max()) + 1
+                    inst.bbox_norm = [
+                        x0 / w,
+                        y0 / h,
+                        (x1 - x0) / w,
+                        (y1 - y0) / h,
+                    ]
+                    reverted_primary += 1
+                    mask_frac = float(len(xs)) / img_px
+                    bbox_frac = float(inst.bbox_norm[2]) * float(inst.bbox_norm[3])
+                    solid = (inst.mask > 40).astype(np.uint8)
+                    n_cc, lab = cv2.connectedComponents(solid, 8)
+                    sizes = sorted(
+                        (int((lab == j).sum()) for j in range(1, n_cc)), reverse=True
+                    )
+                    multi = (
+                        len(sizes) >= 2 and sizes[1] > 0.12 * max(1, sizes[0])
+                    )
+                    opaque = mask_frac / max(bbox_frac, 1e-6)
+                    sparse = bbox_frac > 0.12 and opaque < 0.45
+                # Residual glue / sparse giant → split into per-CC motif layers
+                if is_residual and (
+                    mask_frac > 0.06 or bbox_frac > 0.11 or multi or sparse
+                ):
+                    split_added = 0
+                    for j in range(1, n_cc):
+                        if len(pruned) + split_added >= fill_cap:
+                            break
+                        comp = lab == j
+                        c_area = int(comp.sum())
+                        if c_area < max(80, int(0.0012 * img_px)):
+                            continue
+                        cys, cxs = np.where(comp)
+                        cx0, cx1 = int(cxs.min()), int(cxs.max()) + 1
+                        cy0, cy1 = int(cys.min()), int(cys.max()) + 1
+                        c_bbox = ((cx1 - cx0) / w) * ((cy1 - cy0) / h)
+                        c_mask_frac = c_area / img_px
+                        if c_mask_frac > 0.06 or c_bbox > 0.11:
+                            continue
+                        piece = MotifInstance(
+                            id=f"{inst.id}_s{j}",
+                            label="motif",
+                            bbox_norm=[
+                                cx0 / w,
+                                cy0 / h,
+                                (cx1 - cx0) / w,
+                                (cy1 - cy0) / h,
+                            ],
+                            confidence=min(float(inst.confidence), 0.55),
+                            mask=np.where(comp, inst.mask, 0).astype(np.uint8),
+                            pass_index=getattr(inst, "pass_index", 21),
+                        )
+                        pruned.append(piece)
+                        split_added += 1
+                    if split_added == 0:
+                        dropped_giant += 1
+                    else:
+                        dropped_giant += 1  # original glue discarded after split
                     continue
-                # Extreme size only for primaries (absorb can swell them slightly)
+                # Extreme size for anything that remains
                 if mask_frac > 0.14 or bbox_frac > 0.22:
                     dropped_giant += 1
                     continue
@@ -1258,11 +1340,14 @@ def _hybrid_residual_fill(
             meta["fill_cap"] = fill_cap
             meta["min_area"] = min_area
             meta["dropped_giant_residual"] = dropped_giant
+            meta["reverted_primary"] = reverted_primary
             if n_primary >= 10 and dropped_giant >= 2:
                 print(
                     f"  residual dropped {dropped_giant} giants/multi — "
                     f"keeping cleaner set"
                 )
+            if reverted_primary:
+                print(f"  reverted {reverted_primary} swollen Gemini primaries")
         else:
             target = 0.985
             filled = _cv_residual_gapfill(
@@ -1276,11 +1361,12 @@ def _hybrid_residual_fill(
                 target_coverage=target,
             )
         # New residual instances → slightly lower confidence (uncertain tier)
-        primary_ids = {inst.id for inst in instances}
         for inst in filled:
             if inst.id not in primary_ids and getattr(inst, "pass_index", 0) >= 0:
                 if inst.confidence >= 0.6 and int((inst.mask > 40).sum()) < 0.01 * h * w:
                     inst.confidence = min(inst.confidence, 0.48)
+                elif "_s" in inst.id:
+                    inst.confidence = min(float(inst.confidence), 0.55)
         instances = filled
         meta["after_cv_fill"] = len(instances)
         meta["target_coverage"] = target
