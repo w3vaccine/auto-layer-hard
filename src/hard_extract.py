@@ -676,14 +676,29 @@ def boxes_to_instances_graphic(
             need_ws.append(i)
             continue
         g = g.copy()
-        # Strip pixels owned by OTHER basins (don't require own-basin intersection —
-        # that punched holes in good white-bg cutouts).
-        for j, ws_inst in ws_all.items():
-            if j == i:
-                continue
-            other = ws_inst.mask > 80
-            if other.any():
-                g[other] = 0
+        # Voronoi seed ownership on opaque pixels only (fast).
+        # Hard OTHER-basin strip gutted primary coverage to ~47% on mustard.
+        ys, xs = np.where(g > 20)
+        if len(xs):
+            own_cx, own_cy = centers[i]
+            own_d2 = (xs - own_cx).astype(np.float32) ** 2 + (
+                ys - own_cy
+            ).astype(np.float32) ** 2
+            nearest_other = np.full(len(xs), np.inf, dtype=np.float32)
+            for j, (cx, cy) in enumerate(centers):
+                if j == i:
+                    continue
+                od2 = (xs - cx).astype(np.float32) ** 2 + (ys - cy).astype(
+                    np.float32
+                ) ** 2
+                nearest_other = np.minimum(nearest_other, od2)
+            nearer = nearest_other * 1.15 < own_d2
+            soft = g[ys, xs] < 200
+            drop = nearer & soft
+            far = own_d2 > nearest_other * 1.8
+            drop |= far & nearer
+            if drop.any():
+                g[ys[drop], xs[drop]] = 0
         # Keep largest CC under seed
         solid = (g > 40).astype(np.uint8)
         n_cc, lab = cv2.connectedComponents(solid, 8)
@@ -1162,10 +1177,10 @@ def _hybrid_residual_fill(
             # CV shards explode the layers menu (17 → 48 on mustard tropical).
             n_primary = len(instances)
             if n_primary >= 8:
-                target = 0.90
+                target = 0.82
                 min_area = max(200, int(0.0025 * h * w))
                 rounds = 2
-                fill_cap = min(max_instances, n_primary + 12)
+                fill_cap = min(max_instances, n_primary + 8)
             else:
                 target = 0.97
                 min_area = max(60, int(0.0006 * h * w))
@@ -1184,17 +1199,21 @@ def _hybrid_residual_fill(
                 absorb_any_touch=False,
             )
             filled = _merge_touching_small(filled, min_keep_area=int(0.0008 * h * w))
-            # Never keep residual shards that ate half the print (mustard m009)
+            # Never keep residual shards that ate half the print (mustard m009/m013)
             img_px = float(h * w)
             primary_ids = {inst.id for inst in instances}
             pruned: list[MotifInstance] = []
             dropped_giant = 0
             for inst in filled:
-                frac = float((inst.mask > 20).sum()) / img_px
-                if inst.id not in primary_ids and frac > 0.18:
+                mask_frac = float((inst.mask > 20).sum()) / img_px
+                bb = inst.bbox_norm or [0, 0, 0, 0]
+                bbox_frac = float(bb[2]) * float(bb[3])
+                is_residual = inst.id not in primary_ids
+                # Residual glued blobs: mask OR large bbox (area_frac is bbox)
+                if is_residual and (mask_frac > 0.10 or bbox_frac > 0.16):
                     dropped_giant += 1
                     continue
-                if frac > 0.28:
+                if mask_frac > 0.22 or bbox_frac > 0.35:
                     dropped_giant += 1
                     continue
                 pruned.append(inst)
@@ -1202,6 +1221,12 @@ def _hybrid_residual_fill(
             meta["fill_cap"] = fill_cap
             meta["min_area"] = min_area
             meta["dropped_giant_residual"] = dropped_giant
+            # Prefer clean primaries over chasing 90% with junk
+            if n_primary >= 10 and dropped_giant >= 2:
+                print(
+                    f"  residual dropped {dropped_giant} giants — "
+                    f"keeping primary-heavy set"
+                )
         else:
             target = 0.985
             filled = _cv_residual_gapfill(
@@ -1390,10 +1415,21 @@ def discover_hard_motifs(
         union |= inst.mask > 40
     primary_cov = float((union & ink).sum()) / max(1, int(ink.sum()))
     meta["primary_coverage"] = round(primary_cov, 4)
-    if print_type == "busy" and primary_cov >= 0.92:
+    if print_type == "busy" and primary_cov >= 0.85:
         print(f"  skip residual fill — primary coverage {primary_cov:.3f}")
         fill_meta = {
             "residual_fill": "skipped",
+            "primary_coverage": primary_cov,
+            "added": 0,
+        }
+    elif print_type == "busy" and len(instances) >= 12 and primary_cov >= 0.70:
+        # Enough clean motifs — skip residual to avoid glued giants
+        print(
+            f"  skip residual fill — {len(instances)} primaries "
+            f"cov={primary_cov:.3f}"
+        )
+        fill_meta = {
+            "residual_fill": "skipped_enough_primaries",
             "primary_coverage": primary_cov,
             "added": 0,
         }

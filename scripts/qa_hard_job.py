@@ -44,10 +44,11 @@ def qa_job(job_id: str, out: Path) -> dict:
         border[:, :pad] = True
         border[:, -pad:] = True
         border_opaque = float((mask & border).sum()) / max(1, int(border.sum()))
-        # area_frac is canvas coverage; opaque is fill within the trimmed crop bbox
+        # area_frac in scene.json is bbox area (w*h), not mask coverage
         area_frac = float(L.get("area_frac", 0))
+        mask_canvas = area_frac * opaque
         flags = []
-        if area_frac > 0.22:
+        if mask_canvas > 0.18 or (area_frac > 0.40 and opaque > 0.35):
             flags.append("huge_area")
         if n > 4 and main_frac < 0.8:
             flags.append("multi_cc")
@@ -62,6 +63,7 @@ def qa_job(job_id: str, out: Path) -> dict:
                 "n_cc": int(n),
                 "main_frac": round(float(main_frac), 3),
                 "border_opaque": round(border_opaque, 3),
+                "mask_canvas": round(mask_canvas, 3),
                 "flags": flags,
                 "path": str(path),
             }
