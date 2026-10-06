@@ -48,15 +48,15 @@ Return ONLY JSON:
 bbox_norm = [x,y,w,h] normalized 0..1."""
 
 BUSY_PROMPT = """You are analyzing a dense textile print (leaves, florals, paisley, interlocking motifs).
-Find EACH complete primary motif as its OWN box — one full leaf, one full flower, one full palm frond, one paisley.
+Find EACH complete primary motif as its OWN tight box — one full leaf, one full flower, one full palm frond, one paisley.
 
 Hard rules:
-- WHOLE motif: box covers the entire leaf/flower/frond (tip through stem). Never box only a tip, vein, hole, or edge nick.
-- Overlapping motifs = separate boxes (do NOT merge a monstera with the palm behind it).
-- Typical prints have 8–40 primary motifs. Return as many complete ones as you clearly see.
+- WHOLE motif only: the box must contain the entire silhouette (all lobes, tip, stem). Never cut through the middle of a leaf.
+- ONE motif per box. Overlapping leaves each get their own box (monstera ≠ palm behind it).
+- Tight crop: minimize empty ground and pieces of neighboring motifs inside the box.
+- Typical prints have 8–40 primary motifs. List every complete one you can see.
 - Skip ultra-tiny noise (< ~0.2% of image) and continuous background/ground.
-- NEVER return a box covering more than ~30% of the image, and NEVER one full-image box.
-- Prefer tight boxes with little empty ground inside.
+- NEVER return a box covering more than ~28% of the image, and NEVER a full-image box.
 
 Return ONLY JSON:
 {"motifs":[{"id":"m01","label":"leaf|flower|frond|paisley|motif","bbox_norm":[x,y,w,h],"confidence":0.0_to_1.0}]}
@@ -435,6 +435,175 @@ def _color_matte_in_box(rgb: np.ndarray, bbox_norm: list[float], *, soft: bool) 
     return alpha
 
 
+def seeded_graphic_matte(
+    rgb: np.ndarray,
+    bbox_norm: list[float],
+    bg: np.ndarray,
+    *,
+    competitor_xy: list[tuple[int, int]] | None = None,
+) -> np.ndarray:
+    """Cut one flat-graphic motif from a VLM box.
+
+    Watershed from the box-center seed (all ink tones of that leaf) with
+    ground + other motif centers as background markers. Leaf holes = transparent.
+    """
+    from segment import lab_distance
+
+    h, w = rgb.shape[:2]
+    x0, y0, x1, y1 = _bbox_xyxy(bbox_norm, w, h, pad=0.02)
+    alpha = np.zeros((h, w), dtype=np.uint8)
+    roi = rgb[y0:y1, x0:x1]
+    if roi.size == 0:
+        return alpha
+    rh, rw = roi.shape[:2]
+    dist_bg = lab_distance(roi, bg)
+    ink = dist_bg > 11.0
+    if not ink.any():
+        return alpha
+
+    cy, cx = rh // 2, rw // 2
+    if not ink[cy, cx]:
+        ys, xs = np.where(ink)
+        i = int(np.argmin((ys - cy) ** 2 + (xs - cx) ** 2))
+        cy, cx = int(ys[i]), int(xs[i])
+
+    # Multi-marker watershed on the ROI (OpenCV needs a 3-channel image)
+    markers = np.zeros((rh, rw), dtype=np.int32)
+    # BG: ground + ROI border
+    markers[dist_bg < 9.0] = 1
+    markers[0, :] = 1
+    markers[-1, :] = 1
+    markers[:, 0] = 1
+    markers[:, -1] = 1
+    # Competing motif centers inside this ROI → BG (prevents neighbor swallow)
+    for px, py in competitor_xy or []:
+        lx, ly = px - x0, py - y0
+        if 0 <= lx < rw and 0 <= ly < rh:
+            cv2.circle(markers, (lx, ly), max(4, min(rh, rw) // 25), 1, -1)
+    # FG seed
+    seed_r = max(4, min(rh, rw) // 18)
+    cv2.circle(markers, (cx, cy), seed_r, 2, -1)
+    # Don't put FG on clear ground
+    markers[(markers == 2) & (dist_bg < 9.0)] = 1
+
+    try:
+        ws = roi.copy()
+        cv2.watershed(ws, markers)
+        keep = markers == 2
+    except Exception:  # noqa: BLE001
+        # Fallback: same-hue CC from seed
+        lab = cv2.cvtColor(roi, cv2.COLOR_RGB2LAB).astype(np.float32)
+        seed_rgb = roi[cy, cx].astype(np.float32)
+        seed_lab = cv2.cvtColor(seed_rgb.reshape(1, 1, 3).astype(np.uint8), cv2.COLOR_RGB2LAB)[
+            0, 0
+        ].astype(np.float32)
+        d_seed = np.sqrt(((lab - seed_lab) ** 2).sum(axis=2))
+        same = (d_seed < 32.0) & ink
+        n, labels = cv2.connectedComponents(same.astype(np.uint8), 8)
+        sid = int(labels[cy, cx]) if n > 1 else 0
+        keep = labels == sid if sid > 0 else ink
+
+    # Restrict to ink so bg holes stay empty
+    keep = keep & ink
+    if not keep.any():
+        return alpha
+    # Reattach to seed CC only
+    n2, lab2 = cv2.connectedComponents(keep.astype(np.uint8), 8)
+    if n2 > 1:
+        sid = int(lab2[cy, cx])
+        if sid == 0:
+            ys, xs = np.where(lab2 > 0)
+            if len(xs):
+                i = int(np.argmin((ys - cy) ** 2 + (xs - cx) ** 2))
+                sid = int(lab2[ys[i], xs[i]])
+        if sid > 0:
+            keep = lab2 == sid
+
+    a = keep.astype(np.float32)
+    a = cv2.GaussianBlur(a, (0, 0), 0.5)
+    a = np.clip(a, 0, 1)
+    a[dist_bg < 7.5] = 0.0
+    alpha[y0:y1, x0:x1] = (a * 255.0).astype(np.uint8)
+    return alpha
+
+
+def _exclusive_alphas(instances: list[MotifInstance]) -> list[MotifInstance]:
+    """Larger motifs claim pixels first so crops don't include neighbors."""
+    if len(instances) < 2:
+        return instances
+    order = sorted(
+        range(len(instances)),
+        key=lambda i: -int((instances[i].mask > 40).sum()),
+    )
+    claimed = np.zeros_like(instances[0].mask, dtype=bool)
+    for i in order:
+        m = instances[i].mask
+        solid = m > 40
+        # Strip pixels already owned by a larger motif
+        strip = solid & claimed
+        if strip.any():
+            m = m.copy()
+            m[strip] = 0
+            instances[i].mask = m
+            ys, xs = np.where(m > 20)
+            if len(xs) == 0:
+                continue
+            h, w = m.shape
+            x0, x1 = int(xs.min()), int(xs.max()) + 1
+            y0, y1 = int(ys.min()), int(ys.max()) + 1
+            instances[i].bbox_norm = [x0 / w, y0 / h, (x1 - x0) / w, (y1 - y0) / h]
+        claimed |= instances[i].mask > 40
+    # Drop emptied
+    return [inst for inst in instances if int((inst.mask > 20).sum()) >= 20]
+
+
+def boxes_to_instances_graphic(
+    image: Image.Image,
+    boxes: list[MotifBox],
+) -> list[MotifInstance]:
+    """Busy/sharp graphics: seeded watershed cutouts (not SAM soft-alpha)."""
+    from segment import estimate_background_color
+
+    rgb = np.array(image.convert("RGB"))
+    h, w = rgb.shape[:2]
+    bg = estimate_background_color(rgb)
+    # All box centers as competitors for each other
+    centers: list[tuple[int, int]] = []
+    for b in boxes:
+        x, y, bw, bh = b.bbox_norm
+        centers.append((int((x + bw / 2) * w), int((y + bh / 2) * h)))
+
+    print(f"  graphic matte {len(boxes)} boxes (seeded watershed, exclusive)…")
+    t0 = time.time()
+    instances: list[MotifInstance] = []
+    img_px = float(h * w)
+    for i, b in enumerate(boxes):
+        comps = [c for j, c in enumerate(centers) if j != i]
+        alpha = seeded_graphic_matte(rgb, b.bbox_norm, bg, competitor_xy=comps)
+        if int((alpha > 20).sum()) < 30:
+            continue
+        if float((alpha > 20).sum()) / img_px > 0.45:
+            print(f"  skip {b.id}: graphic matte covers >45% of image")
+            continue
+        ys, xs = np.where(alpha > 20)
+        x0, x1 = int(xs.min()), int(xs.max()) + 1
+        y0, y1 = int(ys.min()), int(ys.max()) + 1
+        instances.append(
+            MotifInstance(
+                id=b.id,
+                label=b.label or "motif",
+                bbox_norm=[x0 / w, y0 / h, (x1 - x0) / w, (y1 - y0) / h],
+                confidence=float(b.confidence),
+                mask=alpha,
+                pass_index=b.pass_index,
+            )
+        )
+    before = len(instances)
+    instances = _exclusive_alphas(instances)
+    print(f"  graphic matte done in {time.time() - t0:.1f}s → {len(instances)} (from {before})")
+    return instances
+
+
 def boxes_to_instances_sam(
     image: Image.Image,
     boxes: list[MotifBox],
@@ -442,9 +611,12 @@ def boxes_to_instances_sam(
     print_type: str,
     sam_model_name: str = "sam2_b.pt",
 ) -> list[MotifInstance]:
+    if print_type == "busy":
+        return boxes_to_instances_graphic(image, boxes)
+
     rgb = np.array(image.convert("RGB"))
     h, w = rgb.shape[:2]
-    mode = "camo" if print_type == "camo" else ("busy" if print_type == "busy" else "soft")
+    mode = "camo" if print_type == "camo" else "soft"
     sam = _get_sam(sam_model_name) if sam_available() else None
     if sam is None:
         print("  SAM unavailable — using color matte fallback inside boxes")
@@ -491,7 +663,7 @@ def boxes_to_instances_sam(
                 pass_index=b.pass_index,
             )
         )
-    return instances
+    return _exclusive_alphas(instances)
 
 
 def _merge_overlapping(instances: list[MotifInstance], iou_thr: float = 0.55) -> list[MotifInstance]:
