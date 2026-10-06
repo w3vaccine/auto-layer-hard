@@ -97,12 +97,12 @@ def qa_job(job_id: str, out: Path) -> dict:
     )
     pass_ok = (
         giants == 0
+        and serious == 0
         and 8 <= len(rows) <= 24
         and n_high >= 8
-        and serious / max(1, len(rows)) <= 0.20
         and (
             cov >= 0.85
-            or (cov >= 0.55 and n_high >= 12 and giants == 0 and serious <= 2)
+            or (cov >= 0.55 and n_high >= 12 and residual <= 0.40)
         )
     )
 
