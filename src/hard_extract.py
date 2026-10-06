@@ -1585,6 +1585,7 @@ def _hybrid_residual_fill(
                 meta["topup_coverage_before"] = round(cov_f, 4)
             # Final canvas-giant guard — split glued leftovers into basins
             final: list[MotifInstance] = []
+            layer_cap = min(max_instances, 22)
             for inst in filled:
                 ys, xs = np.where(inst.mask > 20)
                 if len(xs) == 0:
@@ -1601,12 +1602,12 @@ def _hybrid_residual_fill(
                     pieces = _split_giant_to_motifs(
                         rgb,
                         inst.mask,
-                        max_pieces=min(10, max(2, fill_cap - len(final))),
+                        max_pieces=min(10, max(2, layer_cap - len(final))),
                         min_area=max(120, int(0.001 * img_px)),
                     )
                     dropped_giant += 1
                     for p in pieces:
-                        if len(final) >= min(max_instances, 22):
+                        if len(final) >= layer_cap:
                             break
                         final.append(p)
                     continue
@@ -1617,6 +1618,61 @@ def _hybrid_residual_fill(
                     (y1 - y0) / h,
                 ]
                 final.append(inst)
+            # Cap layer count — keep largest masks (tiny shards → residual sheet)
+            if len(final) > layer_cap:
+                final.sort(key=lambda m: -int((m.mask > 40).sum()))
+                print(f"  cap layers {len(final)} → {layer_cap}")
+                final = final[:layer_cap]
+            # Fringe-only absorb to push coverage over 0.55 without new layers
+            union_f = np.zeros((h, w), dtype=bool)
+            for inst in final:
+                union_f |= inst.mask > 40
+            cov_f = float((union_f & ink0).sum()) / max(1, int(ink0.sum()))
+            if cov_f < 0.58:
+                pre_fringe = {inst.id: inst.mask.copy() for inst in final}
+                soft3 = np.clip((_dist - 7.0) / 15.0, 0, 1)
+                _cv_residual_gapfill(
+                    rgb,
+                    soft3,
+                    final,
+                    bg=bg,
+                    max_instances=len(final),  # absorb only
+                    min_area=max(500, int(0.01 * h * w)),
+                    max_rounds=2,
+                    target_coverage=0.62,
+                    absorb_dilate=7,
+                    absorb_any_touch=False,
+                )
+                # Reject absorb that balloons a layer into a giant
+                for inst in final:
+                    ys, xs = np.where(inst.mask > 20)
+                    if len(xs) == 0:
+                        continue
+                    x0, x1 = int(xs.min()), int(xs.max()) + 1
+                    y0, y1 = int(ys.min()), int(ys.max()) + 1
+                    bbox_frac = ((x1 - x0) / w) * ((y1 - y0) / h)
+                    mask_frac = float(len(xs)) / img_px
+                    if mask_frac > 0.12 or bbox_frac > 0.28:
+                        if inst.id in pre_fringe:
+                            inst.mask = pre_fringe[inst.id]
+                            ys, xs = np.where(inst.mask > 20)
+                            if len(xs):
+                                x0, x1 = int(xs.min()), int(xs.max()) + 1
+                                y0, y1 = int(ys.min()), int(ys.max()) + 1
+                                inst.bbox_norm = [
+                                    x0 / w,
+                                    y0 / h,
+                                    (x1 - x0) / w,
+                                    (y1 - y0) / h,
+                                ]
+                    else:
+                        inst.bbox_norm = [
+                            x0 / w,
+                            y0 / h,
+                            (x1 - x0) / w,
+                            (y1 - y0) / h,
+                        ]
+                meta["fringe_absorb"] = True
             filled = final
             meta["fill_cap"] = fill_cap
             meta["min_area"] = min_area
