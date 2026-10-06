@@ -44,18 +44,16 @@ def qa_job(job_id: str, out: Path) -> dict:
         border[:, :pad] = True
         border[:, -pad:] = True
         border_opaque = float((mask & border).sum()) / max(1, int(border.sum()))
-        mask_px = int(mask.sum())
-        # Full-canvas coverage (layer PNGs are trimmed crops — opaque-in-bbox is not giant)
-        # Approximate via area_frac from scene when available; else use bbox*opaque.
-        canvas_frac = float(L.get("area_frac", 0)) * opaque
+        # area_frac is canvas coverage; opaque is fill within the trimmed crop bbox
+        area_frac = float(L.get("area_frac", 0))
         flags = []
-        if canvas_frac > 0.22 or L["area_frac"] > 0.35:
+        if area_frac > 0.22:
             flags.append("huge_area")
         if n > 4 and main_frac < 0.8:
             flags.append("multi_cc")
-        if border_opaque > 0.35 and L["area_frac"] > 0.04:
+        if border_opaque > 0.35 and area_frac > 0.04:
             flags.append("border_bleed")
-        if opaque < 0.03 and L["area_frac"] < 0.015:
+        if opaque < 0.03 and area_frac < 0.015:
             flags.append("tiny")
         rows.append(
             {
@@ -64,7 +62,6 @@ def qa_job(job_id: str, out: Path) -> dict:
                 "n_cc": int(n),
                 "main_frac": round(float(main_frac), 3),
                 "border_opaque": round(border_opaque, 3),
-                "canvas_frac_est": round(canvas_frac, 3),
                 "flags": flags,
                 "path": str(path),
             }
