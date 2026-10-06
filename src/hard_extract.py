@@ -561,29 +561,83 @@ def boxes_to_instances_graphic(
     image: Image.Image,
     boxes: list[MotifBox],
 ) -> list[MotifInstance]:
-    """Busy/sharp graphics: seeded watershed cutouts (not SAM soft-alpha)."""
-    from segment import estimate_background_color
+    """Busy/sharp graphics: multi-seed watershed cutouts (VLM box = seed only).
+
+    SAM soft-alpha chops leaves and fills holes. Here each VLM center is a
+    watershed marker on the full canvas so motifs grow to their natural
+    silhouette (including past a clipped box) and neighbors compete.
+    """
+    from segment import estimate_background_color, lab_distance
 
     rgb = np.array(image.convert("RGB"))
     h, w = rgb.shape[:2]
     bg = estimate_background_color(rgb)
-    # All box centers as competitors for each other
+    dist_bg = lab_distance(rgb, bg)
+    ink = dist_bg > 11.0
+
     centers: list[tuple[int, int]] = []
     for b in boxes:
         x, y, bw, bh = b.bbox_norm
-        centers.append((int((x + bw / 2) * w), int((y + bh / 2) * h)))
+        cx, cy = int((x + bw / 2) * w), int((y + bh / 2) * h)
+        cx, cy = int(np.clip(cx, 0, w - 1)), int(np.clip(cy, 0, h - 1))
+        # Snap seed onto ink inside the box if center landed in a hole/ground
+        if not ink[cy, cx]:
+            x0, y0, x1, y1 = _bbox_xyxy(b.bbox_norm, w, h, pad=0.0)
+            roi_ink = ink[y0:y1, x0:x1]
+            if roi_ink.any():
+                ys, xs = np.where(roi_ink)
+                i = int(np.argmin((ys + y0 - cy) ** 2 + (xs + x0 - cx) ** 2))
+                cy, cx = int(ys[i] + y0), int(xs[i] + x0)
+        centers.append((cx, cy))
 
-    print(f"  graphic matte {len(boxes)} boxes (seeded watershed, exclusive)…")
+    print(f"  graphic matte {len(boxes)} seeds (full-image watershed)…")
     t0 = time.time()
+    markers = np.zeros((h, w), dtype=np.int32)
+    markers[~ink] = 1  # ground / holes = background
+    # Border as bg so edge-cropped motifs don't flood the frame
+    markers[0, :] = 1
+    markers[-1, :] = 1
+    markers[:, 0] = 1
+    markers[:, -1] = 1
+    seed_r = max(5, min(h, w) // 80)
+    for i, (cx, cy) in enumerate(centers):
+        cv2.circle(markers, (cx, cy), seed_r, i + 2, -1)
+        # Never plant FG on clear ground
+        if dist_bg[cy, cx] < 9.0:
+            markers[cy, cx] = 1
+
+    try:
+        cv2.watershed(rgb.copy(), markers)
+    except Exception as exc:  # noqa: BLE001
+        print(f"  watershed failed ({exc}) — per-box fallback")
+        return _boxes_to_instances_graphic_fallback(rgb, boxes, bg)
+
     instances: list[MotifInstance] = []
     img_px = float(h * w)
     for i, b in enumerate(boxes):
-        comps = [c for j, c in enumerate(centers) if j != i]
-        alpha = seeded_graphic_matte(rgb, b.bbox_norm, bg, competitor_xy=comps)
-        if int((alpha > 20).sum()) < 30:
+        keep = (markers == (i + 2)) & ink
+        if not keep.any():
             continue
-        if float((alpha > 20).sum()) / img_px > 0.45:
-            print(f"  skip {b.id}: graphic matte covers >45% of image")
+        # Keep largest CC (drop speckles from watershed bleed)
+        n, lab = cv2.connectedComponents(keep.astype(np.uint8), 8)
+        if n > 1:
+            areas = [(int((lab == j).sum()), j) for j in range(1, n)]
+            areas.sort(reverse=True)
+            keep = lab == areas[0][1]
+            # If seed not in largest, prefer CC containing seed
+            cx, cy = centers[i]
+            if lab[cy, cx] > 0:
+                keep = lab == lab[cy, cx]
+
+        a = keep.astype(np.float32)
+        a = cv2.GaussianBlur(a, (0, 0), 0.45)
+        a = np.clip(a, 0, 1)
+        a[dist_bg < 7.5] = 0.0
+        alpha = (a * 255.0).astype(np.uint8)
+        if int((alpha > 20).sum()) < 40:
+            continue
+        if float((alpha > 20).sum()) / img_px > 0.4:
+            print(f"  skip {b.id}: basin covers >40% of image")
             continue
         ys, xs = np.where(alpha > 20)
         x0, x1 = int(xs.min()), int(xs.max()) + 1
@@ -598,10 +652,65 @@ def boxes_to_instances_graphic(
                 pass_index=b.pass_index,
             )
         )
+
     before = len(instances)
     instances = _exclusive_alphas(instances)
-    print(f"  graphic matte done in {time.time() - t0:.1f}s → {len(instances)} (from {before})")
+    # Drop near-duplicate basins (two seeds on one leaf)
+    instances = _dedupe_mask_instances(instances, iou_thr=0.55)
+    print(
+        f"  graphic matte done in {time.time() - t0:.1f}s → {len(instances)} "
+        f"(seeds {len(boxes)}, pre-dedupe {before})"
+    )
     return instances
+
+
+def _dedupe_mask_instances(
+    instances: list[MotifInstance], *, iou_thr: float = 0.55
+) -> list[MotifInstance]:
+    if len(instances) < 2:
+        return instances
+    order = sorted(instances, key=lambda i: -int((i.mask > 40).sum()))
+    kept: list[MotifInstance] = []
+    for inst in order:
+        aa = inst.mask > 40
+        drop = False
+        for k in kept:
+            bb = k.mask > 40
+            inter = float((aa & bb).sum())
+            if inter <= 0:
+                continue
+            union = float((aa | bb).sum()) or 1.0
+            if inter / union >= iou_thr:
+                drop = True
+                break
+        if not drop:
+            kept.append(inst)
+    return kept
+
+
+def _boxes_to_instances_graphic_fallback(
+    rgb: np.ndarray, boxes: list[MotifBox], bg: np.ndarray
+) -> list[MotifInstance]:
+    h, w = rgb.shape[:2]
+    instances: list[MotifInstance] = []
+    for b in boxes:
+        alpha = seeded_graphic_matte(rgb, b.bbox_norm, bg, competitor_xy=None)
+        if int((alpha > 20).sum()) < 30:
+            continue
+        ys, xs = np.where(alpha > 20)
+        x0, x1 = int(xs.min()), int(xs.max()) + 1
+        y0, y1 = int(ys.min()), int(ys.max()) + 1
+        instances.append(
+            MotifInstance(
+                id=b.id,
+                label=b.label or "motif",
+                bbox_norm=[x0 / w, y0 / h, (x1 - x0) / w, (y1 - y0) / h],
+                confidence=float(b.confidence),
+                mask=alpha,
+                pass_index=b.pass_index,
+            )
+        )
+    return _exclusive_alphas(instances)
 
 
 def boxes_to_instances_sam(
