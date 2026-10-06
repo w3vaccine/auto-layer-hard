@@ -1246,7 +1246,8 @@ def _hybrid_residual_fill(
                     dropped_giant += 1
                     continue
                 # Fragmented / shard layers (mustard m009/m013)
-                if sizes and sizes[0] / max(1, int(mask_frac * img_px)) < 0.65:
+                main_frac = sizes[0] / max(1, sum(sizes)) if sizes else 1.0
+                if main_frac < 0.65 and (multi or n_cc > 8):
                     dropped_giant += 1
                     continue
                 if mask_frac < 0.0025 and n_cc > 5:
