@@ -1,4 +1,4 @@
-# MTD-2396 Auto Layer POC — teammate handoff
+# MTD-2396 Auto Layer POC 
 
 Working Magic Layer POC: flat print → motif proposal → review → **Layers Menu** (durable accepted layers) → motif pack export.
 
