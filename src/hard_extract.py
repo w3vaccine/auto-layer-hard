@@ -692,10 +692,10 @@ def boxes_to_instances_graphic(
                     np.float32
                 ) ** 2
                 nearest_other = np.minimum(nearest_other, od2)
-            nearer = nearest_other * 1.15 < own_d2
-            soft = g[ys, xs] < 200
+            nearer = nearest_other * 1.08 < own_d2
+            soft = g[ys, xs] < 180
             drop = nearer & soft
-            far = own_d2 > nearest_other * 1.8
+            far = own_d2 > nearest_other * 2.2
             drop |= far & nearer
             if drop.any():
                 g[ys[drop], xs[drop]] = 0
@@ -1186,14 +1186,13 @@ def _hybrid_residual_fill(
             # CV shards explode the layers menu (17 → 48 on mustard tropical).
             n_primary = len(instances)
             if n_primary >= 12:
-                # Enough clean Gemini/WS motifs — absorb leftovers into them only.
-                # New residual layers were gluing multi-motif giants (mustard m015).
-                target = 0.78
-                min_area = max(300, int(0.003 * h * w))
-                rounds = 1
-                fill_cap = n_primary  # no new residual layers
+                # Prefer absorbing into Gemini cutouts; allow a few small new pieces
+                target = 0.88
+                min_area = max(250, int(0.0028 * h * w))
+                rounds = 2
+                fill_cap = min(max_instances, n_primary + 4)
             elif n_primary >= 8:
-                target = 0.82
+                target = 0.88
                 min_area = max(200, int(0.0025 * h * w))
                 rounds = 2
                 fill_cap = min(max_instances, n_primary + 6)
@@ -1215,21 +1214,34 @@ def _hybrid_residual_fill(
                 absorb_any_touch=False,
             )
             filled = _merge_touching_small(filled, min_keep_area=int(0.0008 * h * w))
-            # Never keep residual shards that ate half the print (mustard m009/m013)
+            # Drop glued / multi-motif layers (primaries can grow via absorb too)
             img_px = float(h * w)
             primary_ids = {inst.id for inst in instances}
             pruned: list[MotifInstance] = []
             dropped_giant = 0
             for inst in filled:
-                mask_frac = float((inst.mask > 20).sum()) / img_px
-                bb = inst.bbox_norm or [0, 0, 0, 0]
-                bbox_frac = float(bb[2]) * float(bb[3])
+                ys, xs = np.where(inst.mask > 20)
+                if len(xs) == 0:
+                    continue
+                # Refresh bbox from mask before size checks
+                x0, x1 = int(xs.min()), int(xs.max()) + 1
+                y0, y1 = int(ys.min()), int(ys.max()) + 1
+                inst.bbox_norm = [x0 / w, y0 / h, (x1 - x0) / w, (y1 - y0) / h]
+                mask_frac = float(len(xs)) / img_px
+                bbox_frac = float(inst.bbox_norm[2]) * float(inst.bbox_norm[3])
                 is_residual = inst.id not in primary_ids
-                # Residual glued blobs: mask OR large bbox (area_frac is bbox)
-                if is_residual and (mask_frac > 0.07 or bbox_frac > 0.12):
+                solid = (inst.mask > 40).astype(np.uint8)
+                n_cc, lab = cv2.connectedComponents(solid, 8)
+                sizes = sorted(
+                    (int((lab == j).sum()) for j in range(1, n_cc)), reverse=True
+                )
+                multi = (
+                    len(sizes) >= 2 and sizes[1] > 0.12 * max(1, sizes[0])
+                )
+                if is_residual and (mask_frac > 0.06 or bbox_frac > 0.11 or multi):
                     dropped_giant += 1
                     continue
-                if mask_frac > 0.18 or bbox_frac > 0.30:
+                if mask_frac > 0.14 or bbox_frac > 0.20 or (multi and bbox_frac > 0.08):
                     dropped_giant += 1
                     continue
                 pruned.append(inst)
@@ -1237,11 +1249,10 @@ def _hybrid_residual_fill(
             meta["fill_cap"] = fill_cap
             meta["min_area"] = min_area
             meta["dropped_giant_residual"] = dropped_giant
-            # Prefer clean primaries over chasing 90% with junk
             if n_primary >= 10 and dropped_giant >= 2:
                 print(
-                    f"  residual dropped {dropped_giant} giants — "
-                    f"keeping primary-heavy set"
+                    f"  residual dropped {dropped_giant} giants/multi — "
+                    f"keeping cleaner set"
                 )
         else:
             target = 0.985
