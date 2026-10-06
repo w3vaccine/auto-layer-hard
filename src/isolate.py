@@ -212,33 +212,55 @@ def _ensure_cutout_alpha(rgba: np.ndarray, crop_rgb: np.ndarray) -> np.ndarray |
 
 
 def _looks_like_checkerboard(rgba: np.ndarray) -> bool:
-    """Detect common model failure: drawing a checker instead of alpha."""
+    """Detect common model failure: drawing a checker instead of alpha.
+
+    Use NEAREST downsample — AREA averaging kills fine checker signal.
+    Also flag alpha that dither-flips at high frequency over a large region.
+    """
     rgb = rgba[:, :, :3].astype(np.float32)
+    alpha = rgba[:, :, 3].astype(np.float32)
     h, w = rgb.shape[:2]
     if h < 16 or w < 16:
         return False
-    # Sample a coarse grid of 8x8 blocks; checkerboards have high neighbor contrast
-    # with only ~2 dominant colors in "background-looking" regions.
-    small = cv2.resize(rgb, (64, 64), interpolation=cv2.INTER_AREA)
-    # High-frequency tile signal: difference between even/odd cells
-    a = small[0::2, 0::2].reshape(-1, 3)
-    b = small[0::2, 1::2].reshape(-1, 3)
-    c = small[1::2, 0::2].reshape(-1, 3)
-    d = small[1::2, 1::2].reshape(-1, 3)
-    n = min(len(a), len(b), len(c), len(d))
-    if n < 20:
+
+    # --- RGB painted checkers (green/white, gray/white, etc.) ---
+    small = cv2.resize(rgb, (64, 64), interpolation=cv2.INTER_NEAREST)
+    a = small[0::2, 0::2]
+    b = small[0::2, 1::2]
+    c = small[1::2, 0::2]
+    d = small[1::2, 1::2]
+    n = min(a.shape[0], b.shape[0], c.shape[0], d.shape[0])
+    m = min(a.shape[1], b.shape[1], c.shape[1], d.shape[1])
+    if n < 4 or m < 4:
         return False
-    pair = np.mean(np.abs(a[:n] - b[:n]) + np.abs(c[:n] - d[:n]), axis=1)
-    # Also check for near-white + mid-gray / green-white alternating (common)
+    a, b, c, d = a[:n, :m], b[:n, :m], c[:n, :m], d[:n, :m]
+    adj = (
+        np.mean(np.abs(a - b), axis=2)
+        + np.mean(np.abs(a - c), axis=2)
+        + np.mean(np.abs(d - b), axis=2)
+        + np.mean(np.abs(d - c), axis=2)
+    ) / 4.0
+    diag = (np.mean(np.abs(a - d), axis=2) + np.mean(np.abs(b - c), axis=2)) / 2.0
+    score = adj - diag
     lum = small.mean(axis=2)
-    hi = float((lum > 230).mean())
-    mid = float(((lum > 80) & (lum < 200)).mean())
-    if float(np.median(pair)) > 35 and hi > 0.15 and mid > 0.15:
+    hi = float((lum > 220).mean())
+    # Strong checker: adjacent cells differ, diagonals match
+    if float((score > 25).mean()) > 0.12 and hi > 0.08:
         return True
-    # Green/white checker specifically (seen in failed extracts)
-    g = small[:, :, 1]
-    if float(((g > 100) & (lum < 200)).mean()) > 0.2 and float((lum > 240).mean()) > 0.15:
-        if float(np.median(pair)) > 28:
+    if float(np.percentile(score, 85)) > 40 and hi > 0.05:
+        return True
+
+    # --- Alpha dither checkers (opaque/transparent flip as fake transparency) ---
+    if float(alpha.mean()) < 250:
+        sa = cv2.resize(alpha, (64, 64), interpolation=cv2.INTER_NEAREST)
+        aa = sa[0::2, 0::2][:n, :m]
+        bb = sa[0::2, 1::2][:n, :m]
+        cc = sa[1::2, 0::2][:n, :m]
+        dd = sa[1::2, 1::2][:n, :m]
+        a_adj = (np.abs(aa - bb) + np.abs(aa - cc) + np.abs(dd - bb) + np.abs(dd - cc)) / 4.0
+        a_diag = (np.abs(aa - dd) + np.abs(bb - cc)) / 2.0
+        a_score = a_adj - a_diag
+        if float((a_score > 80).mean()) > 0.10:
             return True
     return False
 

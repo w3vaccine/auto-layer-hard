@@ -528,18 +528,24 @@ def seeded_graphic_matte(
 
 
 def _exclusive_alphas(instances: list[MotifInstance]) -> list[MotifInstance]:
-    """Larger motifs claim pixels first so crops don't include neighbors."""
+    """Higher-confidence / tighter motifs claim pixels first.
+
+    Preferring largest-first let Gemini multi-leaf blobs swallow neighbors.
+    """
     if len(instances) < 2:
         return instances
     order = sorted(
         range(len(instances)),
-        key=lambda i: -int((instances[i].mask > 40).sum()),
+        key=lambda i: (
+            -float(instances[i].confidence),
+            int((instances[i].mask > 40).sum()),  # smaller wins ties
+        ),
     )
     claimed = np.zeros_like(instances[0].mask, dtype=bool)
     for i in order:
         m = instances[i].mask
         solid = m > 40
-        # Strip pixels already owned by a larger motif
+        # Strip pixels already owned by a preferred motif
         strip = solid & claimed
         if strip.any():
             m = m.copy()
@@ -639,28 +645,70 @@ def boxes_to_instances_graphic(
                     gem_alphas[i] = alpha
                     print(f"    gemini ok {boxes[i].id} ({boxes[i].label})")
 
-    # Watershed fallback for misses / no API
-    need_ws = [i for i in range(len(boxes)) if i not in gem_alphas]
-    ws_instances: dict[int, MotifInstance] = {}
-    if need_ws:
-        print(f"  watershed fallback for {len(need_ws)} boxes…")
-        fb = _watershed_instances_for_indices(rgb, boxes, bg, dist_bg, need_ws)
-        ws_instances = fb
+    # Always watershed all seeds — used to clip Gemini neighbor bleed + fill misses
+    print(f"  watershed basins for {len(boxes)} seeds (clip + fallback)…")
+    ws_instances = _watershed_instances_for_indices(
+        rgb, boxes, bg, dist_bg, list(range(len(boxes)))
+    )
+
+    # Seed centers for cross-talk rejection
+    centers: list[tuple[int, int]] = []
+    for b in boxes:
+        x, y, bw, bh = b.bbox_norm
+        cx, cy = int((x + bw / 2) * w), int((y + bh / 2) * h)
+        centers.append((int(np.clip(cx, 0, w - 1)), int(np.clip(cy, 0, h - 1))))
 
     instances: list[MotifInstance] = []
+    gemini_kept = 0
     for i, b in enumerate(boxes):
+        alpha: np.ndarray | None = None
+        method_conf = float(b.confidence)
+        use_gemini = False
         if i in gem_alphas:
-            alpha = gem_alphas[i]
-            method_conf = max(float(b.confidence), 0.78)
+            g = gem_alphas[i]
+            foreign = sum(
+                1
+                for j, (cx, cy) in enumerate(centers)
+                if j != i and int(g[cy, cx]) > 140
+            )
+            if foreign >= 2:
+                print(f"    gemini reject {b.id}: covers {foreign} other seeds")
+            elif i in ws_instances:
+                ws = ws_instances[i].mask.astype(np.float32) / 255.0
+                clipped = (g.astype(np.float32) * ws).astype(np.uint8)
+                keep_frac = float((clipped > 20).sum()) / max(
+                    1.0, float((g > 20).sum())
+                )
+                if keep_frac < 0.25 or int((clipped > 20).sum()) < 40:
+                    print(
+                        f"    gemini→ws weak {b.id} (keep={keep_frac:.2f}); "
+                        "use watershed"
+                    )
+                else:
+                    # Trust Gemini detail inside basin; kill outside
+                    alpha = np.where(
+                        ws > 0.35, g, (g.astype(np.float32) * ws).astype(np.uint8)
+                    ).astype(np.uint8)
+                    use_gemini = True
+            else:
+                alpha = g
+                use_gemini = True
+
+        if use_gemini and alpha is not None:
+            gemini_kept += 1
+            method_conf = max(method_conf, 0.82 if i in ws_instances else 0.78)
         elif i in ws_instances:
-            instances.append(ws_instances[i])
-            continue
-        else:
+            alpha = ws_instances[i].mask
+            method_conf = float(b.confidence)
+
+        if alpha is None:
             continue
         if float((alpha > 20).sum()) / img_px > 0.4:
             print(f"  skip {b.id}: cutout covers >40% of image")
             continue
         ys, xs = np.where(alpha > 20)
+        if len(xs) == 0:
+            continue
         x0, x1 = int(xs.min()), int(xs.max()) + 1
         y0, y1 = int(ys.min()), int(ys.max()) + 1
         instances.append(
@@ -679,7 +727,8 @@ def boxes_to_instances_graphic(
     instances = _dedupe_mask_instances(instances, iou_thr=0.55)
     print(
         f"  graphic cutouts done in {time.time() - t0:.1f}s → {len(instances)} "
-        f"(gemini {len(gem_alphas)}, ws {len(ws_instances)}, pre {before})"
+        f"(gemini_raw {len(gem_alphas)}, gemini_kept {gemini_kept}, "
+        f"ws {len(ws_instances)}, pre {before})"
     )
     return instances
 
