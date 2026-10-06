@@ -645,12 +645,6 @@ def boxes_to_instances_graphic(
                     gem_alphas[i] = alpha
                     print(f"    gemini ok {boxes[i].id} ({boxes[i].label})")
 
-    # Always watershed all seeds — used to clip Gemini neighbor bleed + fill misses
-    print(f"  watershed basins for {len(boxes)} seeds (clip + fallback)…")
-    ws_instances = _watershed_instances_for_indices(
-        rgb, boxes, bg, dist_bg, list(range(len(boxes)))
-    )
-
     # Seed centers for cross-talk rejection
     centers: list[tuple[int, int]] = []
     for b in boxes:
@@ -658,53 +652,75 @@ def boxes_to_instances_graphic(
         cx, cy = int((x + bw / 2) * w), int((y + bh / 2) * h)
         centers.append((int(np.clip(cx, 0, w - 1)), int(np.clip(cy, 0, h - 1))))
 
+    # White-bg Gemini is the quality path — trust it when it looks like one motif.
+    # Watershed only for misses / rejected Gemini (clipping was punching good cutouts).
+    need_ws = [i for i in range(len(boxes)) if i not in gem_alphas]
+    accepted_gem: dict[int, np.ndarray] = {}
+    for i, g in gem_alphas.items():
+        frac = float((g > 20).sum()) / img_px
+        foreign = sum(
+            1
+            for j, (cx, cy) in enumerate(centers)
+            if j != i and int(g[cy, cx]) > 140
+        )
+        if frac > 0.28 or foreign >= 2:
+            print(
+                f"    gemini reject {boxes[i].id}: "
+                f"frac={frac:.2f} foreign_seeds={foreign}"
+            )
+            need_ws.append(i)
+            continue
+        # Keep largest connected component under the crop (kill speckles)
+        solid = (g > 40).astype(np.uint8)
+        n_cc, lab = cv2.connectedComponents(solid, 8)
+        if n_cc > 2:
+            cx, cy = centers[i]
+            lid = int(lab[cy, cx]) if lab[cy, cx] > 0 else 0
+            if lid <= 0:
+                areas = [(int((lab == j).sum()), j) for j in range(1, n_cc)]
+                areas.sort(reverse=True)
+                lid = areas[0][1] if areas else 0
+            if lid > 0:
+                keep = lab == lid
+                g = g.copy()
+                g[~keep] = 0
+        accepted_gem[i] = g
+
+    ws_instances: dict[int, MotifInstance] = {}
+    if need_ws:
+        print(f"  watershed fallback for {len(need_ws)} seeds…")
+        ws_instances = _watershed_instances_for_indices(
+            rgb, boxes, bg, dist_bg, sorted(set(need_ws))
+        )
+
+    # Soft competition among Gemini alphas: higher alpha wins overlapping pixels
+    if len(accepted_gem) >= 2:
+        stack_ids = list(accepted_gem.keys())
+        stack = np.stack([accepted_gem[i] for i in stack_ids], axis=0)
+        winner = np.argmax(stack, axis=0)
+        maxv = stack.max(axis=0)
+        for k, i in enumerate(stack_ids):
+            m = accepted_gem[i].copy()
+            m[(maxv > 40) & (winner != k)] = 0
+            accepted_gem[i] = m
+
     instances: list[MotifInstance] = []
     gemini_kept = 0
     for i, b in enumerate(boxes):
         alpha: np.ndarray | None = None
         method_conf = float(b.confidence)
-        use_gemini = False
-        if i in gem_alphas:
-            g = gem_alphas[i]
-            foreign = sum(
-                1
-                for j, (cx, cy) in enumerate(centers)
-                if j != i and int(g[cy, cx]) > 140
-            )
-            if foreign >= 2:
-                print(f"    gemini reject {b.id}: covers {foreign} other seeds")
-            elif i in ws_instances:
-                ws = ws_instances[i].mask.astype(np.float32) / 255.0
-                clipped = (g.astype(np.float32) * ws).astype(np.uint8)
-                keep_frac = float((clipped > 20).sum()) / max(
-                    1.0, float((g > 20).sum())
-                )
-                if keep_frac < 0.25 or int((clipped > 20).sum()) < 40:
-                    print(
-                        f"    gemini→ws weak {b.id} (keep={keep_frac:.2f}); "
-                        "use watershed"
-                    )
-                else:
-                    # Trust Gemini detail inside basin; kill outside
-                    alpha = np.where(
-                        ws > 0.35, g, (g.astype(np.float32) * ws).astype(np.uint8)
-                    ).astype(np.uint8)
-                    use_gemini = True
-            else:
-                alpha = g
-                use_gemini = True
-
-        if use_gemini and alpha is not None:
+        if i in accepted_gem:
+            alpha = accepted_gem[i]
             gemini_kept += 1
-            method_conf = max(method_conf, 0.82 if i in ws_instances else 0.78)
+            method_conf = max(method_conf, 0.85)
         elif i in ws_instances:
             alpha = ws_instances[i].mask
             method_conf = float(b.confidence)
 
         if alpha is None:
             continue
-        if float((alpha > 20).sum()) / img_px > 0.4:
-            print(f"  skip {b.id}: cutout covers >40% of image")
+        if float((alpha > 20).sum()) / img_px > 0.28:
+            print(f"  skip {b.id}: cutout covers >28% of image")
             continue
         ys, xs = np.where(alpha > 20)
         if len(xs) == 0:
@@ -725,6 +741,15 @@ def boxes_to_instances_graphic(
     before = len(instances)
     instances = _exclusive_alphas(instances)
     instances = _dedupe_mask_instances(instances, iou_thr=0.55)
+    # Final giant-layer guard (residual/WS can still glue)
+    kept: list[MotifInstance] = []
+    for inst in instances:
+        frac = float((inst.mask > 20).sum()) / img_px
+        if frac > 0.28:
+            print(f"  drop {inst.id}: giant layer frac={frac:.2f}")
+            continue
+        kept.append(inst)
+    instances = kept
     print(
         f"  graphic cutouts done in {time.time() - t0:.1f}s → {len(instances)} "
         f"(gemini_raw {len(gem_alphas)}, gemini_kept {gemini_kept}, "
@@ -1144,8 +1169,24 @@ def _hybrid_residual_fill(
                 absorb_any_touch=False,
             )
             filled = _merge_touching_small(filled, min_keep_area=int(0.0008 * h * w))
+            # Never keep residual shards that ate half the print (mustard m009)
+            img_px = float(h * w)
+            primary_ids = {inst.id for inst in instances}
+            pruned: list[MotifInstance] = []
+            dropped_giant = 0
+            for inst in filled:
+                frac = float((inst.mask > 20).sum()) / img_px
+                if inst.id not in primary_ids and frac > 0.18:
+                    dropped_giant += 1
+                    continue
+                if frac > 0.28:
+                    dropped_giant += 1
+                    continue
+                pruned.append(inst)
+            filled = pruned
             meta["fill_cap"] = fill_cap
             meta["min_area"] = min_area
+            meta["dropped_giant_residual"] = dropped_giant
         else:
             target = 0.985
             filled = _cv_residual_gapfill(
@@ -1272,8 +1313,15 @@ def discover_hard_motifs(
         model=model,
         max_instances=primary_cap,
     )
-    # Sparse / failed VLM → SLIC seeds (better than 1 giant residual blob)
-    if len(boxes) < 6:
+    # Sparse VLM → SLIC seeds (tropical needs ≥12 seeds; 8 left too much for residual)
+    if print_type == "busy" and len(boxes) < 12:
+        from discover import _dedupe as _dedupe_boxes
+
+        print(f"  hard path: only {len(boxes)} VLM boxes — merging SLIC fallback")
+        slic = _slic_fallback_boxes(image, print_type, primary_cap)
+        boxes = _dedupe_boxes(boxes + slic, iou_thresh=0.4)[:primary_cap]
+        meta["slic_merged"] = True
+    elif len(boxes) < 6:
         from discover import _dedupe as _dedupe_boxes
 
         print(f"  hard path: only {len(boxes)} VLM boxes — merging SLIC fallback")
