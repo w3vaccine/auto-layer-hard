@@ -642,7 +642,15 @@ def boxes_to_instances_graphic(
     gem_alphas: dict[int, np.ndarray] = {}
     extract_counts = {"gpt": 0, "gemini": 0}
     if (api_key or openai_key) and extract_idx:
-        workers = min(3 if extract_backend in ("gpt", "auto") else 4, len(extract_idx))
+        # GPT images/edits rate-limits hard — serialize by default
+        try:
+            workers = max(1, int(os.environ.get("HARD_BUSY_EXTRACT_WORKERS", "1")))
+        except ValueError:
+            workers = 1
+        if extract_backend == "gemini":
+            workers = min(4, len(extract_idx))
+        else:
+            workers = min(workers, len(extract_idx))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futs = [pool.submit(_one_extract, i, boxes[i]) for i in extract_idx]
             for fut in as_completed(futs):
@@ -679,7 +687,9 @@ def boxes_to_instances_graphic(
             for j, (cx, cy) in enumerate(centers)
             if j != i and int(g[cy, cx]) > 140
         )
-        if frac > 0.28 or foreign >= 2:
+        # GPT whole leaves often touch a neighbor seed in dense tropical —
+        # only reject when the cutout is huge or clearly multi-seed glue.
+        if frac > 0.28 or foreign >= 3:
             print(
                 f"    extract reject {boxes[i].id}: "
                 f"frac={frac:.2f} foreign_seeds={foreign}"

@@ -293,8 +293,35 @@ def _gpt_extract_crop(
             },
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            payload = json.load(resp)
+        last_err: Exception | None = None
+        payload = None
+        for attempt in range(5):
+            try:
+                with urllib.request.urlopen(req, timeout=300) as resp:
+                    payload = json.load(resp)
+                break
+            except urllib.error.HTTPError as exc:
+                last_err = exc
+                # Rate limit / transient — backoff then rebuild body for retry
+                if exc.code in (429, 500, 502, 503) and attempt < 4:
+                    import time as _time
+
+                    wait = 8.0 * (attempt + 1)
+                    print(f"    gpt extract {exc.code}, retry in {wait:.0f}s…")
+                    _time.sleep(wait)
+                    req = urllib.request.Request(
+                        "https://api.openai.com/v1/images/edits",
+                        data=body,
+                        headers={
+                            "Authorization": f"Bearer {key}",
+                            "Content-Type": f"multipart/form-data; boundary={boundary}",
+                        },
+                        method="POST",
+                    )
+                    continue
+                raise
+        if payload is None:
+            raise last_err or RuntimeError("gpt extract empty")
         b64 = payload["data"][0]["b64_json"]
         full = Image.open(BytesIO(base64.b64decode(b64))).convert("RGB")
         full_sq = full.resize((side, side), Image.Resampling.LANCZOS)
