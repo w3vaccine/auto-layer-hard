@@ -570,13 +570,14 @@ def boxes_to_instances_graphic(
     api_key: str | None = None,
     extract_model: str = "gemini-2.5-flash-image",
 ) -> list[MotifInstance]:
-    """Busy/sharp graphics: Gemini cutout per VLM box, watershed fallback.
+    """Busy/sharp graphics: GPT/Gemini white-bg cutout per VLM box, watershed fallback.
 
-    Gemini decides what belongs to the motif (neighbors out, holes transparent).
+    GPT image edits win whole-motif isolation on mustard tropical; Gemini is
+    the fast fallback. Original print pixels are kept under the cutout matte.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    from isolate import _bbox_to_pixels, _gemini_extract_crop
+    from isolate import _bbox_to_pixels, _extract_crop
     from segment import estimate_background_color, lab_distance
 
     rgb = np.array(image.convert("RGB"))
@@ -585,33 +586,42 @@ def boxes_to_instances_graphic(
     dist_bg = lab_distance(rgb, bg)
     img_px = float(h * w)
 
+    extract_backend = os.environ.get("HARD_BUSY_EXTRACT", "auto").lower().strip()
     try:
-        extract_cap = max(4, int(os.environ.get("HARD_BUSY_GEMINI_EXTRACT", "20")))
+        extract_cap = max(4, int(os.environ.get("HARD_BUSY_GEMINI_EXTRACT", "16")))
     except ValueError:
-        extract_cap = 20
-    # Prefer larger boxes for Gemini budget
+        extract_cap = 16
+    # GPT is slower — default to fewer concurrent cutouts when using it
+    if extract_backend in ("gpt", "auto") and os.environ.get("OPENAI_API_KEY"):
+        try:
+            extract_cap = max(4, int(os.environ.get("HARD_BUSY_GPT_EXTRACT", "12")))
+        except ValueError:
+            extract_cap = 12
     ordered = sorted(enumerate(boxes), key=lambda ib: -ib[1].area())
     extract_idx = {i for i, _ in ordered[: min(extract_cap, len(boxes))]}
 
+    openai_key = os.environ.get("OPENAI_API_KEY")
     print(
-        f"  graphic cutouts: Gemini extract on {len(extract_idx)}/{len(boxes)} "
+        f"  graphic cutouts: {extract_backend} extract on {len(extract_idx)}/{len(boxes)} "
         f"(fallback=watershed)…"
     )
     t0 = time.time()
 
-    def _one_gemini(i: int, b: MotifBox) -> tuple[int, np.ndarray | None]:
+    def _one_extract(i: int, b: MotifBox) -> tuple[int, np.ndarray | None, str]:
         x0, y0, x1, y1 = _bbox_to_pixels(b.bbox_norm, w, h, pad=0.12)
         crop = rgb[y0:y1, x0:x1]
         if crop.size == 0:
-            return i, None
-        gem = _gemini_extract_crop(
+            return i, None, "empty"
+        gem, src = _extract_crop(
             Image.fromarray(crop),
             b.label or "motif",
-            api_key,
-            model=extract_model,
+            google_key=api_key,
+            openai_key=openai_key,
+            backend=extract_backend,
+            gemini_model=extract_model,
         )
         if gem is None:
-            return i, None
+            return i, None, src
         if gem.shape[0] != crop.shape[0] or gem.shape[1] != crop.shape[1]:
             gem = np.array(
                 Image.fromarray(gem).resize(
@@ -620,33 +630,34 @@ def boxes_to_instances_graphic(
             )
         alpha_full = np.zeros((h, w), dtype=np.uint8)
         a = gem[:, :, 3]
-        # Prefer original print pixels under the cutout (don't trust Gemini RGB edits)
-        # but punch clear ground so holes stay open
+        # Prefer original print pixels under the cutout matte
         local = a.copy()
         roi_bg = dist_bg[y0:y1, x0:x1]
         local[roi_bg < 8.0] = (local[roi_bg < 8.0].astype(np.float32) * 0.15).astype(np.uint8)
         alpha_full[y0:y1, x0:x1] = local
         if int((alpha_full > 20).sum()) < 40:
-            return i, None
-        return i, alpha_full
+            return i, None, src
+        return i, alpha_full, src
 
     gem_alphas: dict[int, np.ndarray] = {}
-    if api_key and extract_idx:
-        workers = min(4, len(extract_idx))
+    extract_counts = {"gpt": 0, "gemini": 0}
+    if (api_key or openai_key) and extract_idx:
+        workers = min(3 if extract_backend in ("gpt", "auto") else 4, len(extract_idx))
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futs = [pool.submit(_one_gemini, i, boxes[i]) for i in extract_idx]
+            futs = [pool.submit(_one_extract, i, boxes[i]) for i in extract_idx]
             for fut in as_completed(futs):
                 try:
-                    i, alpha = fut.result()
+                    i, alpha, src = fut.result()
                 except Exception as exc:  # noqa: BLE001
-                    print(f"  gemini extract worker failed: {exc}")
+                    print(f"  extract worker failed: {exc}")
                     continue
                 if alpha is not None:
                     gem_alphas[i] = alpha
-                    print(f"    gemini ok {boxes[i].id} ({boxes[i].label})")
+                    extract_counts[src] = extract_counts.get(src, 0) + 1
+                    print(f"    {src} ok {boxes[i].id} ({boxes[i].label})")
 
-    # Always compute watershed basins — used to strip neighbors from Gemini,
-    # and as fallback when Gemini is rejected/missing.
+    # Always compute watershed basins — used to strip neighbors from cutouts,
+    # and as fallback when extract is rejected/missing.
     print(f"  watershed basins for {len(boxes)} seeds…")
     ws_all = _watershed_instances_for_indices(
         rgb, boxes, bg, dist_bg, list(range(len(boxes)))
@@ -658,7 +669,7 @@ def boxes_to_instances_graphic(
         cx, cy = int((x + bw / 2) * w), int((y + bh / 2) * h)
         centers.append((int(np.clip(cx, 0, w - 1)), int(np.clip(cy, 0, h - 1))))
 
-    # White-bg Gemini is the quality path — trust it when it looks like one motif.
+    # White-bg cutout is the quality path — trust it when it looks like one motif.
     accepted_gem: dict[int, np.ndarray] = {}
     need_ws: list[int] = []
     for i, g in list(gem_alphas.items()):
@@ -670,7 +681,7 @@ def boxes_to_instances_graphic(
         )
         if frac > 0.28 or foreign >= 2:
             print(
-                f"    gemini reject {boxes[i].id}: "
+                f"    extract reject {boxes[i].id}: "
                 f"frac={frac:.2f} foreign_seeds={foreign}"
             )
             need_ws.append(i)
@@ -782,7 +793,7 @@ def boxes_to_instances_graphic(
         # Only reject true sparse glue after heal (keep huge fenestrated leaves)
         if bbox_frac > 0.22 and opaque < 0.38:
             print(
-                f"    gemini heal-reject {boxes[i].id}: "
+                f"    extract heal-reject {boxes[i].id}: "
                 f"bbox={bbox_frac:.2f} opaque={opaque:.2f}"
             )
             need_ws.append(i)
@@ -797,13 +808,13 @@ def boxes_to_instances_graphic(
             ws_instances[i] = ws_all[i]
 
     instances: list[MotifInstance] = []
-    gemini_kept = 0
+    extract_kept = 0
     for i, b in enumerate(boxes):
         alpha: np.ndarray | None = None
         method_conf = float(b.confidence)
         if i in accepted_gem:
             alpha = accepted_gem[i]
-            gemini_kept += 1
+            extract_kept += 1
             method_conf = max(method_conf, 0.85)
         elif i in ws_instances:
             alpha = ws_instances[i].mask
@@ -853,7 +864,8 @@ def boxes_to_instances_graphic(
     instances = kept
     print(
         f"  graphic cutouts done in {time.time() - t0:.1f}s → {len(instances)} "
-        f"(gemini_raw {len(gem_alphas)}, gemini_kept {gemini_kept}, "
+        f"(extract_raw {len(gem_alphas)} gpt={extract_counts.get('gpt', 0)} "
+        f"gemini={extract_counts.get('gemini', 0)}, kept {extract_kept}, "
         f"ws {len(ws_instances)}, pre {before})"
     )
     return instances

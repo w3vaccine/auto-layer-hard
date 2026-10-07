@@ -8,6 +8,12 @@ services:
     envVars:
       - key: GOOGLE_API_KEY
         sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: HARD_BUSY_EXTRACT
+        value: auto
+      - key: HARD_BUSY_GPT_EXTRACT
+        value: "12"
       - key: PYTHONUNBUFFERED
         value: "1"
       - key: SAM_MODEL

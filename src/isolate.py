@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import base64
+import json
+import os
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -126,13 +131,71 @@ def _trim_alpha(rgba: np.ndarray, pad: int = 2) -> tuple[np.ndarray, tuple[int, 
     return rgba[y0:y1, x0:x1], (x0, y0, x1 - x0, y1 - y0)
 
 
-# Bakeoff winner on mustard tropical (3 hard crops × 7 prompts):
-# short white-bg cutout >> asking for real alpha (models fake alpha / keep neighbors).
-_GEMINI_EXTRACT_PROMPT = (
+# Bakeoff: short white-bg cutout >> asking for real alpha.
+# GPT image edits beat Gemini on whole single motifs (mustard tropical 2026-10);
+# Gemini stays as fast fallback. Same prompt for both.
+_EXTRACT_PROMPT = (
     "Cut out only the centered {label} on pure white #FFFFFF. "
     "Delete all other leaves even if they overlap the subject. "
     "Holes white. No checkerboard. Keep original colors."
 )
+_GEMINI_EXTRACT_PROMPT = _EXTRACT_PROMPT  # alias
+
+
+def _alpha_from_white_bg(rgb: np.ndarray) -> np.ndarray:
+    """Build soft alpha from distance to pure white (white-bg cutout path)."""
+    d = np.sqrt(((rgb.astype(np.float32) - 255.0) ** 2).sum(axis=2))
+    # Near-white → transparent; ink stays opaque
+    return np.clip((d - 8.0) / 18.0, 0, 1)
+
+
+def _ensure_cutout_alpha(
+    rgba: np.ndarray,
+    crop_rgb: np.ndarray,
+    *,
+    keep_model_rgb: bool = False,
+) -> np.ndarray | None:
+    """Normalize white-bg cutout alpha; optionally keep model RGB or original print."""
+    out = rgba.copy()
+    a = out[:, :, 3].astype(np.float32)
+    rgb = out[:, :, :3].astype(np.float32)
+
+    white_frac = float((rgb.min(axis=2) > 245).mean())
+    # White-bg path first — fenestrated leaves false-trigger checker detection
+    if white_frac >= 0.15 or float(a.mean()) >= 240:
+        alpha = _alpha_from_white_bg(rgb)
+        if float((alpha > 0.5).mean()) < 0.02:
+            h, w = out.shape[:2]
+            b = max(2, min(6, h // 16, w // 16))
+            border = np.concatenate(
+                [
+                    crop_rgb[:b].reshape(-1, 3),
+                    crop_rgb[-b:].reshape(-1, 3),
+                    crop_rgb[:, :b].reshape(-1, 3),
+                    crop_rgb[:, -b:].reshape(-1, 3),
+                ],
+                axis=0,
+            ).astype(np.float32)
+            bg = np.median(border, axis=0)
+            d = np.sqrt(((rgb - bg) ** 2).sum(axis=2))
+            alpha = np.clip((d - 12.0) / 20.0, 0, 1)
+            alpha[rgb.mean(axis=2) > 245] = 0
+        if keep_model_rgb:
+            out[:, :, :3] = np.clip(rgb, 0, 255).astype(np.uint8)
+        else:
+            # Print fidelity: original crop pixels under the model's matte
+            out[:, :, :3] = crop_rgb
+        out[:, :, 3] = (alpha * 255).astype(np.uint8)
+        if float((out[:, :, 3] > 128).mean()) > 0.85:
+            print("    extract reject: cutout still full-frame")
+            return None
+        return out
+
+    # Non-white path: reject painted checkers
+    if _looks_like_checkerboard(out):
+        print("    extract reject: checkerboard/fake transparency")
+        return None
+    return out
 
 
 def _gemini_extract_crop(
@@ -149,9 +212,7 @@ def _gemini_extract_crop(
         client = genai.Client(api_key=api_key) if api_key else genai.Client()
         buf = BytesIO()
         crop_rgb.save(buf, format="PNG")
-        prompt = _GEMINI_EXTRACT_PROMPT.format(
-            label=label or "primary motif"
-        )
+        prompt = _EXTRACT_PROMPT.format(label=label or "primary motif")
         resp = client.models.generate_content(
             model=model,
             contents=[
@@ -159,7 +220,6 @@ def _gemini_extract_crop(
                 types.Part.from_bytes(data=buf.getvalue(), mime_type="image/png"),
             ],
         )
-        # Pull first inline image if present
         for cand in getattr(resp, "candidates", None) or []:
             content = getattr(cand, "content", None)
             if not content:
@@ -178,51 +238,101 @@ def _gemini_extract_crop(
     return None
 
 
-def _alpha_from_white_bg(rgb: np.ndarray) -> np.ndarray:
-    """Build soft alpha from distance to pure white (white-bg cutout path)."""
-    d = np.sqrt(((rgb.astype(np.float32) - 255.0) ** 2).sum(axis=2))
-    # Near-white → transparent; ink stays opaque
-    return np.clip((d - 8.0) / 18.0, 0, 1)
-
-
-def _ensure_cutout_alpha(rgba: np.ndarray, crop_rgb: np.ndarray) -> np.ndarray | None:
-    """Normalize Gemini cutout alpha; return None if the model faked transparency."""
-    out = rgba.copy()
-    a = out[:, :, 3].astype(np.float32)
-    rgb = out[:, :, :3].astype(np.float32)
-
-    # Reject obvious checkerboard / grid "transparency" renders
-    if _looks_like_checkerboard(out):
-        print("    gemini reject: checkerboard/fake transparency")
+def _gpt_extract_crop(
+    crop_rgb: Image.Image,
+    label: str,
+    api_key: str | None = None,
+    model: str = "gpt-image-2.5-flare",
+) -> np.ndarray | None:
+    """OpenAI images/edits white-bg cutout; alpha from white, RGB from original print."""
+    key = api_key or os.environ.get("OPENAI_API_KEY")
+    if not key:
         return None
+    try:
+        w, h = crop_rgb.size
+        side = max(w, h)
+        canvas = Image.new("RGB", (side, side), (255, 255, 255))
+        ox, oy = (side - w) // 2, (side - h) // 2
+        canvas.paste(crop_rgb.convert("RGB"), (ox, oy))
+        send = canvas
+        if side > 1024:
+            send = canvas.resize((1024, 1024), Image.Resampling.LANCZOS)
+        buf = BytesIO()
+        send.save(buf, format="PNG")
+        png = buf.getvalue()
+        prompt = _EXTRACT_PROMPT.format(label=label or "primary motif")
+        boundary = "----MTDExtractBoundary"
+        parts = []
+        for name, val in (
+            ("model", model),
+            ("prompt", prompt),
+            ("size", "1024x1024"),
+            ("quality", "high"),
+        ):
+            parts.append(
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+                f"{val}\r\n"
+            )
+        parts.append(
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="image"; filename="in.png"\r\n'
+            f"Content-Type: image/png\r\n\r\n"
+        )
+        body = (
+            b"".join(p.encode() for p in parts)
+            + png
+            + f"\r\n--{boundary}--\r\n".encode()
+        )
+        req = urllib.request.Request(
+            "https://api.openai.com/v1/images/edits",
+            data=body,
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            payload = json.load(resp)
+        b64 = payload["data"][0]["b64_json"]
+        full = Image.open(BytesIO(base64.b64decode(b64))).convert("RGB")
+        full_sq = full.resize((side, side), Image.Resampling.LANCZOS)
+        cut = full_sq.crop((ox, oy, ox + w, oy + h))
+        rgba = np.dstack(
+            [np.array(cut), np.full((h, w), 255, dtype=np.uint8)]
+        )
+        # GPT silhouette is the quality win; keep original print colors under it
+        return _ensure_cutout_alpha(
+            rgba, np.array(crop_rgb.convert("RGB")), keep_model_rgb=False
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"    gpt extract failed: {exc}")
+    return None
 
-    white_frac = float((rgb.min(axis=2) > 245).mean())
-    # Preferred path: model put subject on #FFF — rebuild alpha from white
-    if white_frac >= 0.20 or float(a.mean()) >= 240:
-        alpha = _alpha_from_white_bg(rgb)
-        # If white-bg rebuild collapses (almost nothing left), fall back to border matte
-        if float((alpha > 0.5).mean()) < 0.02:
-            h, w = out.shape[:2]
-            b = max(2, min(6, h // 16, w // 16))
-            border = np.concatenate(
-                [
-                    crop_rgb[:b].reshape(-1, 3),
-                    crop_rgb[-b:].reshape(-1, 3),
-                    crop_rgb[:, :b].reshape(-1, 3),
-                    crop_rgb[:, -b:].reshape(-1, 3),
-                ],
-                axis=0,
-            ).astype(np.float32)
-            bg = np.median(border, axis=0)
-            d = np.sqrt(((rgb - bg) ** 2).sum(axis=2))
-            alpha = np.clip((d - 12.0) / 20.0, 0, 1)
-            alpha[rgb.mean(axis=2) > 245] = 0
-        out[:, :, 3] = (alpha * 255).astype(np.uint8)
-        # Reject if still nearly full-frame (failed to isolate)
-        if float((out[:, :, 3] > 128).mean()) > 0.85:
-            print("    gemini reject: cutout still full-frame")
-            return None
-    return out
+
+def _extract_crop(
+    crop_rgb: Image.Image,
+    label: str,
+    *,
+    google_key: str | None = None,
+    openai_key: str | None = None,
+    backend: str | None = None,
+    gemini_model: str = "gemini-2.5-flash-image",
+    gpt_model: str = "gpt-image-2.5-flare",
+) -> tuple[np.ndarray | None, str]:
+    """Dispatch motif cutout. backend: gpt | gemini | auto (gpt then gemini)."""
+    mode = (backend or os.environ.get("HARD_BUSY_EXTRACT", "auto")).lower().strip()
+    if mode in ("gpt", "auto"):
+        arr = _gpt_extract_crop(crop_rgb, label, openai_key, model=gpt_model)
+        if arr is not None:
+            return arr, "gpt"
+        if mode == "gpt":
+            return None, "gpt"
+    arr = _gemini_extract_crop(crop_rgb, label, google_key, model=gemini_model)
+    if arr is not None:
+        return arr, "gemini"
+    return None, mode
 
 
 def _looks_like_checkerboard(rgba: np.ndarray) -> bool:
